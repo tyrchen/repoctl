@@ -1,3 +1,5 @@
 # Specs
 
-All specs that for AI to generate code.
+Specs for repoctl product and implementation work.
+
+See [index.md](index.md) for the current spec index.
