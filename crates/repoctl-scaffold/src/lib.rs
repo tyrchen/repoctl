@@ -72,6 +72,7 @@ impl ScaffoldService {
             "AGENTS.md",
             root_agents(&request.name.to_string()),
         )?);
+        operations.push(file_operation(".gitignore", gitignore())?);
         operations.push(file_operation("docs/index.md", docs_index())?);
         operations.extend(skill_operations()?);
         apply_operations(&root, &operations, request.dry_run)?;
@@ -1033,6 +1034,74 @@ fn root_agents(name: &str) -> String {
     )
 }
 
+fn gitignore() -> String {
+    format!(
+        r"{MANAGED_HEADER}
+# Rust
+target/
+*.rs.bk
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+.eslintcache
+.parcel-cache/
+.turbo/
+.vite/
+.next/
+out/
+dist/
+coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# Local environment
+.env
+.env.*
+"
+    )
+}
+
 fn docs_index() -> String {
     format!("{MANAGED_HEADER}\n# Documentation\n\n- Repository initialized by repoctl.\n")
 }
@@ -1317,7 +1386,28 @@ mod tests {
                 .iter()
                 .any(|op| op.path.as_str() == "repo.yaml")
         );
+        assert!(
+            plan.operations
+                .iter()
+                .any(|op| op.path.as_str() == ".gitignore")
+        );
         assert!(temp.path().join("apps").is_dir());
+        let gitignore = fs::read_to_string(temp.path().join(".gitignore")).expect("gitignore");
+        for pattern in [
+            "target/",
+            "node_modules/",
+            ".pnpm-store/",
+            "__pycache__/",
+            ".venv/",
+            ".ruff_cache/",
+            ".DS_Store",
+            ".env.*",
+        ] {
+            assert!(
+                gitignore.contains(pattern),
+                ".gitignore should contain `{pattern}`"
+            );
+        }
         assert!(!temp.path().join("Cargo.toml").exists());
     }
 

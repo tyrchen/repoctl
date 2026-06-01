@@ -18,13 +18,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use repoctl::{
     AffectedReport, AffectedRequest, AiContext, AiContextRequest, BoundaryLintRequest,
     CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic,
-    ExplainReport, ExplainRequest, GraphPrintReport, GraphPrintRequest, GraphValidateRequest,
-    IacFacadeReport, IacFacadeRequest, IacProvider, InitPlan, InitProfile, InitRequest,
-    NewProjectRequest, OwnerHandle, PrSummary, PrSummaryRequest, ProjectKind, ProjectName,
-    ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation, ProtoPackageName, RenderPlan,
-    RepoLayout, RepoName, RepoRelativePath, Repoctl, RepoctlError, Severity, SkillsFacadeRequest,
-    TaskName, TaskRunReport, TaskRunRequest, TemplateListReport, TemplateListRequest,
-    TemplateRenderRequest, TemplateSource, ValidationReport, WorkspaceName,
+    ExplainReport, ExplainRequest, FileOperation, GraphPrintReport, GraphPrintRequest,
+    GraphValidateRequest, IacFacadeReport, IacFacadeRequest, IacProvider, InitPlan, InitProfile,
+    InitRequest, NewProjectRequest, OwnerHandle, PrSummary, PrSummaryRequest, ProcessCommand,
+    ProjectKind, ProjectName, ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation,
+    ProtoPackageName, RenderPlan, RepoLayout, RepoName, RepoRelativePath, Repoctl, RepoctlError,
+    Severity, SkillsFacadeRequest, TaskName, TaskRunReport, TaskRunRequest, TemplateListReport,
+    TemplateListRequest, TemplateRenderRequest, TemplateSource, ValidationReport, WorkspaceName,
 };
 
 mod interactive;
@@ -32,7 +32,13 @@ mod interactive;
 use interactive::{InteractiveArgs, NewProjectPromptContext, normalize_new_project_path};
 
 #[derive(Debug, Parser)]
-#[command(name = "repoctl", version, about = "Monorepo control plane")]
+#[command(
+    name = "repoctl",
+    version,
+    about = "Manage graph-aware monorepos",
+    long_about = "repoctl manages graph-aware monorepos: scaffolding, validation, affected-task \
+                  analysis, CI matrices, templates, skills, proto ownership, and IaC planning."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -61,7 +67,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
-    /// Create a project from built-in templates.
+    /// Scaffold a project from built-in conventions.
     New {
         #[command(subcommand)]
         command: NewCommand,
@@ -82,7 +88,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
-    /// Run boundary policy checks.
+    /// Check boundary policies.
     LintBoundaries {
         /// Repository root or path inside the repo.
         #[arg(long)]
@@ -115,7 +121,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
-    /// Run repo tasks.
+    /// Plan or run repository tasks.
     Run {
         /// Task name.
         task: String,
@@ -150,17 +156,17 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
-    /// CI helpers.
+    /// Generate CI data.
     Ci {
         #[command(subcommand)]
         command: CiCommand,
     },
-    /// Template helpers.
+    /// List and render templates.
     Template {
         #[command(subcommand)]
         command: TemplateCommand,
     },
-    /// Generated-code helpers.
+    /// Check generated-code policy.
     Codegen {
         #[command(subcommand)]
         command: CodegenCommand,
@@ -184,17 +190,17 @@ enum Command {
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
-    /// Pull request helpers.
+    /// Build pull request summaries.
     Pr {
         #[command(subcommand)]
         command: PrCommand,
     },
-    /// `IaC` helpers.
+    /// Plan infrastructure commands.
     Iac {
         #[command(subcommand)]
         command: IacCommand,
     },
-    /// Skills helpers.
+    /// Check and synchronize generated skills.
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
@@ -270,7 +276,7 @@ enum CiCommand {
         #[arg(long)]
         head: Option<String>,
         /// Output format.
-        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
     /// Summarize CI matrix.
@@ -590,7 +596,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     repo,
                     changed_files,
                 })?;
-                render_validation_report(&report, format)?;
+                render_validation_report(&report, format, "Graph validation passed.")?;
                 Ok(exit_for_diagnostics(&report.diagnostics))
             }
             GraphCommand::Print { repo, format } => {
@@ -619,7 +625,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 changed_files,
             })?;
             let validation = ValidationReport::new(report.diagnostics);
-            render_validation_report(&validation, format)?;
+            render_validation_report(&validation, format, "No boundary violations found.")?;
             Ok(exit_for_diagnostics(&validation.diagnostics))
         }
         Command::Affected {
@@ -862,7 +868,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     dry_run: false,
                 })?;
                 let validation = ValidationReport::new(report.diagnostics);
-                render_validation_report(&validation, format)?;
+                render_validation_report(&validation, format, "Skills are in sync.")?;
                 Ok(exit_for_diagnostics(&validation.diagnostics))
             }
             SkillsCommand::Sync {
@@ -876,7 +882,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     dry_run,
                 })?;
                 let validation = ValidationReport::new(report.diagnostics);
-                render_validation_report(&validation, format)?;
+                render_validation_report(&validation, format, "Skills are in sync.")?;
                 Ok(exit_for_diagnostics(&validation.diagnostics))
             }
         },
@@ -1023,10 +1029,10 @@ fn render_init_plan(plan: &InitPlan, format: OutputFormat) -> Result<(), Repoctl
         OutputFormat::Json | OutputFormat::GithubActions => write_json(plan),
         OutputFormat::Human => {
             let mut output = String::new();
-            for operation in &plan.operations {
-                let _ = writeln!(&mut output, "{} {}", operation.operation, operation.path);
-            }
-            render_optional_diagnostics(&mut output, &plan.warnings);
+            append_title(&mut output, "Repository initialization plan");
+            append_operation_table(&mut output, "Files and directories", &plan.operations);
+            append_diagnostics(&mut output, &plan.warnings);
+            append_numbered_section(&mut output, "Next steps", &plan.next_steps);
             write_stdout(&output)
         }
     }
@@ -1037,10 +1043,9 @@ fn render_render_plan(plan: &RenderPlan, format: OutputFormat) -> Result<(), Rep
         OutputFormat::Json | OutputFormat::GithubActions => write_json(plan),
         OutputFormat::Human => {
             let mut output = String::new();
-            for operation in &plan.operations {
-                let _ = writeln!(&mut output, "{} {}", operation.operation, operation.path);
-            }
-            render_optional_diagnostics(&mut output, &plan.diagnostics);
+            append_title(&mut output, "Planned changes");
+            append_operation_table(&mut output, "Files and directories", &plan.operations);
+            append_diagnostics(&mut output, &plan.diagnostics);
             write_stdout(&output)
         }
     }
@@ -1049,12 +1054,13 @@ fn render_render_plan(plan: &RenderPlan, format: OutputFormat) -> Result<(), Rep
 fn render_validation_report(
     report: &ValidationReport,
     format: OutputFormat,
+    success_message: &str,
 ) -> Result<(), RepoctlError> {
     match format {
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
         OutputFormat::Human => {
             if report.diagnostics.is_empty() {
-                write_stdout("OK: graph validation passed\n")
+                write_stdout(&format!("{success_message}\n"))
             } else {
                 render_diagnostics(&report.diagnostics)
             }
@@ -1067,18 +1073,37 @@ fn render_graph_print(report: &GraphPrintReport, format: OutputFormat) -> Result
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
         OutputFormat::Human => {
             let mut output = String::new();
-            output.push_str("Nodes:\n");
-            for node in &report.snapshot.graph.nodes {
-                let _ = writeln!(&mut output, "  {} [{}]", node.id, node.label);
-            }
-            output.push_str("Edges:\n");
-            for edge in &report.snapshot.graph.edges {
-                let _ = writeln!(
-                    &mut output,
-                    "  {} -> {} ({:?})",
-                    edge.from, edge.to, edge.kind
-                );
-            }
+            append_title(&mut output, "Repository graph");
+            append_table(
+                &mut output,
+                &format!("Nodes ({})", report.snapshot.graph.nodes.len()),
+                &["Id", "Label"],
+                report
+                    .snapshot
+                    .graph
+                    .nodes
+                    .iter()
+                    .map(|node| vec![node.id.clone(), node.label.clone()])
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                &format!("Edges ({})", report.snapshot.graph.edges.len()),
+                &["From", "To", "Kind"],
+                report
+                    .snapshot
+                    .graph
+                    .edges
+                    .iter()
+                    .map(|edge| {
+                        vec![
+                            edge.from.clone(),
+                            edge.to.clone(),
+                            format!("{:?}", edge.kind),
+                        ]
+                    })
+                    .collect(),
+            );
             write_stdout(&output)
         }
     }
@@ -1092,19 +1117,33 @@ fn render_explain(report: &ExplainReport, format: OutputFormat) -> Result<(), Re
                 return render_diagnostics(&report.diagnostics);
             }
             let mut output = String::new();
-            let _ = writeln!(&mut output, "Selector: {}", report.selector);
-            output.push_str("Nodes:\n");
-            for node in &report.nodes {
-                let _ = writeln!(&mut output, "  {} [{}]", node.id, node.label);
-            }
-            output.push_str("Edges:\n");
-            for edge in &report.edges {
-                let _ = writeln!(
-                    &mut output,
-                    "  {} -> {} ({:?})",
-                    edge.from, edge.to, edge.kind
-                );
-            }
+            let _ = writeln!(&mut output, "Explanation for `{}`\n", report.selector);
+            append_table(
+                &mut output,
+                &format!("Nodes ({})", report.nodes.len()),
+                &["Id", "Label"],
+                report
+                    .nodes
+                    .iter()
+                    .map(|node| vec![node.id.clone(), node.label.clone()])
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                &format!("Edges ({})", report.edges.len()),
+                &["From", "To", "Kind"],
+                report
+                    .edges
+                    .iter()
+                    .map(|edge| {
+                        vec![
+                            edge.from.clone(),
+                            edge.to.clone(),
+                            format!("{:?}", edge.kind),
+                        ]
+                    })
+                    .collect(),
+            );
             write_stdout(&output)
         }
     }
@@ -1115,23 +1154,54 @@ fn render_affected(report: &AffectedReport, format: OutputFormat) -> Result<(), 
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
         OutputFormat::Human => {
             let mut output = String::new();
-            output.push_str("Direct:\n");
-            for project in &report.directly_affected {
-                let _ = writeln!(&mut output, "  {project}");
-            }
-            output.push_str("Transitive:\n");
-            for project in &report.transitively_affected {
-                let _ = writeln!(&mut output, "  {project}");
-            }
-            output.push_str("Reasons:\n");
-            for reason in &report.reasons {
-                let _ = writeln!(
-                    &mut output,
-                    "  {} -> {}: {}",
-                    reason.source, reason.target, reason.reason
-                );
-            }
-            render_optional_diagnostics(&mut output, &report.diagnostics);
+            append_title(&mut output, "Affected summary");
+            append_list_section(
+                &mut output,
+                "Direct projects",
+                report
+                    .directly_affected
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            );
+            append_list_section(
+                &mut output,
+                "Transitive projects",
+                report
+                    .transitively_affected
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            );
+            append_list_section(&mut output, "Workspaces", report.workspaces.clone());
+            append_list_section(&mut output, "Tasks", report.tasks.clone());
+            append_list_section(&mut output, "Risk flags", report.risk_flags.clone());
+            append_list_section(
+                &mut output,
+                "Suggested reviewers",
+                report
+                    .suggested_reviewers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                &format!("Reasons ({})", report.reasons.len()),
+                &["Source", "Target", "Reason"],
+                report
+                    .reasons
+                    .iter()
+                    .map(|reason| {
+                        vec![
+                            reason.source.clone(),
+                            reason.target.clone(),
+                            reason.reason.clone(),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_diagnostics(&mut output, &report.diagnostics);
             write_stdout(&output)
         }
     }
@@ -1142,25 +1212,27 @@ fn render_task_report(report: &TaskRunReport, format: OutputFormat) -> Result<()
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
         OutputFormat::Human => {
             let mut output = String::new();
-            for command in &report.commands {
-                let _ = writeln!(
-                    &mut output,
-                    "{} {}",
-                    command.program,
-                    command.args.join(" ")
-                );
-            }
-            for output_item in &report.outputs {
-                let _ = writeln!(
-                    &mut output,
-                    "{}:{}:{} status {}",
-                    output_item.project,
-                    output_item.workspace,
-                    output_item.task,
-                    output_item.output.status
-                );
-            }
-            render_optional_diagnostics(&mut output, &report.diagnostics);
+            append_title(&mut output, "Task report");
+            append_command_table(&mut output, "Planned commands", &report.commands);
+            append_table(
+                &mut output,
+                &format!("Results ({})", report.outputs.len()),
+                &["Project", "Workspace", "Task", "Status"],
+                report
+                    .outputs
+                    .iter()
+                    .map(|output_item| {
+                        vec![
+                            output_item.project.to_string(),
+                            output_item.workspace.to_string(),
+                            output_item.task.to_string(),
+                            output_item.output.status.to_string(),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_failed_output(&mut output, report);
+            append_diagnostics(&mut output, &report.diagnostics);
             write_stdout(&output)
         }
     }
@@ -1172,9 +1244,23 @@ fn render_ci_matrix(report: &CiMatrixReport, format: OutputFormat) -> Result<(),
         OutputFormat::Json => write_json(report),
         OutputFormat::Human => {
             let mut output = String::new();
-            for entry in &report.entries {
-                let _ = writeln!(&mut output, "{entry}");
-            }
+            append_title(&mut output, "CI matrix");
+            append_table(
+                &mut output,
+                &format!("Entries ({})", report.entries.len()),
+                &["Project", "Workspace", "Task"],
+                report
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        vec![
+                            json_field(entry, "project"),
+                            json_field(entry, "workspace"),
+                            json_field(entry, "task"),
+                        ]
+                    })
+                    .collect(),
+            );
             write_stdout(&output)
         }
     }
@@ -1186,18 +1272,7 @@ fn render_template_list(
 ) -> Result<(), RepoctlError> {
     match format {
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
-        OutputFormat::Human => {
-            let mut output = String::new();
-            for template in &report.templates {
-                let _ = writeln!(
-                    &mut output,
-                    "{}\t{}\t{}",
-                    template.source, template.kind, template.name
-                );
-            }
-            render_optional_diagnostics(&mut output, &report.diagnostics);
-            write_stdout(&output)
-        }
+        OutputFormat::Human => write_stdout(&format_template_list_human(report)),
     }
 }
 
@@ -1206,7 +1281,7 @@ fn render_codegen_report(
     format: OutputFormat,
 ) -> Result<(), RepoctlError> {
     let validation = ValidationReport::new(report.diagnostics.clone());
-    render_validation_report(&validation, format)
+    render_validation_report(&validation, format, "Generated-code check passed.")
 }
 
 fn render_proto_report(
@@ -1217,34 +1292,19 @@ fn render_proto_report(
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
         OutputFormat::Human => {
             let mut output = String::new();
-            if !report.owners.is_empty() {
-                output.push_str("Owners:\n");
-                for owner in &report.owners {
-                    let _ = writeln!(&mut output, "  {owner}");
-                }
-            }
-            if !report.consumers.is_empty() {
-                output.push_str("Consumers:\n");
-                for consumer in &report.consumers {
-                    let _ = writeln!(&mut output, "  {consumer}");
-                }
-            }
-            if !report.commands.is_empty() {
-                output.push_str("Commands:\n");
-                for command in &report.commands {
-                    let _ = writeln!(
-                        &mut output,
-                        "  (cd {} && {} {})",
-                        command.cwd,
-                        command.program,
-                        command.args.join(" ")
-                    );
-                }
-            }
-            render_optional_diagnostics(&mut output, &report.diagnostics);
-            if output.is_empty() {
-                output.push_str("OK\n");
-            }
+            append_title(&mut output, "Proto report");
+            append_list_section(
+                &mut output,
+                "Owners",
+                report.owners.iter().map(ToString::to_string).collect(),
+            );
+            append_list_section(
+                &mut output,
+                "Consumers",
+                report.consumers.iter().map(ToString::to_string).collect(),
+            );
+            append_command_table(&mut output, "Commands", &report.commands);
+            append_diagnostics(&mut output, &report.diagnostics);
             write_stdout(&output)
         }
     }
@@ -1269,57 +1329,284 @@ fn render_iac_report(report: &IacFacadeReport, format: OutputFormat) -> Result<(
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
         OutputFormat::Human => {
             let mut output = String::new();
-            output.push_str("Commands:\n");
-            for command in &report.commands {
-                let _ = writeln!(
-                    &mut output,
-                    "  (cd {} && {} {})",
-                    command.cwd,
-                    command.program,
-                    command.args.join(" ")
-                );
-            }
-            output.push_str("Risk flags:\n");
-            for risk in &report.risk_flags {
-                let _ = writeln!(&mut output, "  {risk}");
-            }
-            render_optional_diagnostics(&mut output, &report.diagnostics);
+            append_title(&mut output, "IaC plan");
+            append_command_table(&mut output, "Commands", &report.commands);
+            append_list_section(&mut output, "Risk flags", report.risk_flags.clone());
+            append_diagnostics(&mut output, &report.diagnostics);
             write_stdout(&output)
         }
     }
 }
 
-fn render_optional_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
+fn append_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+    if !output.ends_with("\n\n") {
+        output.push('\n');
+    }
+    let _ = writeln!(output, "Diagnostics ({})", diagnostics.len());
     for diagnostic in diagnostics {
-        let _ = writeln!(
-            output,
-            "{} [{:?}]: {}",
-            diagnostic.code, diagnostic.severity, diagnostic.message
-        );
+        append_diagnostic(output, diagnostic);
     }
 }
 
 fn render_diagnostics(diagnostics: &[Diagnostic]) -> Result<(), RepoctlError> {
     let mut output = String::new();
     for diagnostic in diagnostics {
-        let severity = match diagnostic.severity {
-            Severity::Info => "info",
-            Severity::Warning => "warning",
-            Severity::Error => "error",
-        };
-        let _ = writeln!(
-            &mut output,
-            "{} [{}]: {}",
-            diagnostic.code, severity, diagnostic.message
-        );
-        if let Some(source) = &diagnostic.source {
-            let _ = writeln!(&mut output, "  at {}", source.path);
-        }
-        if let Some(help) = &diagnostic.help {
-            let _ = writeln!(&mut output, "  help: {help}");
-        }
+        append_diagnostic(&mut output, diagnostic);
     }
     write_stdout(&output)
+}
+
+fn format_template_list_human(report: &TemplateListReport) -> String {
+    let mut output = String::new();
+    append_title(&mut output, "Available templates");
+    append_table(
+        &mut output,
+        &format!("Templates ({})", report.templates.len()),
+        &["Source", "Kind", "Name"],
+        report
+            .templates
+            .iter()
+            .map(|template| {
+                vec![
+                    template.source.clone(),
+                    template.kind.clone(),
+                    template.name.clone(),
+                ]
+            })
+            .collect(),
+    );
+    if !report.templates.is_empty() {
+        output.push_str("\nRender a template with:\n");
+        output.push_str("  repoctl template render <source> --input name=<name>\n");
+    }
+    append_diagnostics(&mut output, &report.diagnostics);
+    output
+}
+
+fn append_title(output: &mut String, title: &str) {
+    let _ = writeln!(output, "{title}");
+    let _ = writeln!(output, "{}", "-".repeat(title.len()));
+    output.push('\n');
+}
+
+fn append_operation_table(output: &mut String, title: &str, operations: &[FileOperation]) {
+    append_table(
+        output,
+        &format!("{title} ({})", operations.len()),
+        &["Operation", "Path"],
+        operations
+            .iter()
+            .map(|operation| vec![operation.operation.clone(), operation.path.to_string()])
+            .collect(),
+    );
+}
+
+fn append_command_table(output: &mut String, title: &str, commands: &[ProcessCommand]) {
+    append_table(
+        output,
+        &format!("{title} ({})", commands.len()),
+        &["Scope", "Directory", "Command"],
+        commands
+            .iter()
+            .map(|command| {
+                vec![
+                    command_scope(command),
+                    command.cwd.to_string(),
+                    command_line(command),
+                ]
+            })
+            .collect(),
+    );
+}
+
+fn append_table(output: &mut String, title: &str, headers: &[&str], rows: Vec<Vec<String>>) {
+    if !output.ends_with("\n\n") {
+        output.push('\n');
+    }
+    let _ = writeln!(output, "{title}");
+    if rows.is_empty() {
+        output.push_str("  (none)\n");
+        return;
+    }
+
+    let mut widths = headers
+        .iter()
+        .map(|header| header.len())
+        .collect::<Vec<_>>();
+    for row in &rows {
+        for (index, cell) in row.iter().enumerate() {
+            if let Some(width) = widths.get_mut(index) {
+                *width = (*width).max(cell.len());
+            } else {
+                widths.push(cell.len());
+            }
+        }
+    }
+
+    let header_cells = headers
+        .iter()
+        .map(|header| (*header).to_string())
+        .collect::<Vec<_>>();
+    append_table_row(output, &widths, &header_cells);
+    let separators = widths
+        .iter()
+        .map(|width| "-".repeat(*width))
+        .collect::<Vec<_>>();
+    append_table_row(output, &widths, &separators);
+    for row in rows {
+        append_table_row(output, &widths, &row);
+    }
+}
+
+fn append_table_row(output: &mut String, widths: &[usize], cells: &[String]) {
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            output.push_str("  ");
+        }
+        if index + 1 == cells.len() {
+            output.push_str(cell);
+        } else {
+            let width = widths.get(index).copied().unwrap_or(cell.len());
+            let _ = write!(output, "{cell:<width$}");
+        }
+    }
+    output.push('\n');
+}
+
+fn append_list_section(output: &mut String, title: &str, items: Vec<String>) {
+    if !output.ends_with("\n\n") {
+        output.push('\n');
+    }
+    let _ = writeln!(output, "{title} ({})", items.len());
+    if items.is_empty() {
+        output.push_str("  (none)\n");
+        return;
+    }
+    for item in items {
+        let _ = writeln!(output, "  {item}");
+    }
+}
+
+fn append_numbered_section(output: &mut String, title: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    if !output.ends_with("\n\n") {
+        output.push('\n');
+    }
+    let _ = writeln!(output, "{title}");
+    for (index, item) in items.iter().enumerate() {
+        let number = index + 1;
+        let _ = writeln!(output, "  {number}. {item}");
+    }
+}
+
+fn append_diagnostic(output: &mut String, diagnostic: &Diagnostic) {
+    let _ = writeln!(
+        output,
+        "{}: {}",
+        severity_label(&diagnostic.severity),
+        diagnostic.message
+    );
+    let _ = writeln!(output, "  code: {}", diagnostic.code);
+    if let Some(source) = &diagnostic.source {
+        let _ = writeln!(output, "  path: {}", source.path);
+        if let Some(span) = &source.span {
+            let _ = writeln!(output, "  span: {}:{}", span.line, span.column);
+        }
+    }
+    if let Some(project) = &diagnostic.project {
+        let _ = writeln!(output, "  project: {project}");
+    }
+    if let Some(workspace) = &diagnostic.workspace {
+        let _ = writeln!(output, "  workspace: {workspace}");
+    }
+    if let Some(help) = &diagnostic.help {
+        let _ = writeln!(output, "  help: {help}");
+    }
+}
+
+fn append_failed_output(output: &mut String, report: &TaskRunReport) {
+    let failed = report
+        .outputs
+        .iter()
+        .filter(|output_item| output_item.output.status != 0)
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        return;
+    }
+    if !output.ends_with("\n\n") {
+        output.push('\n');
+    }
+    let _ = writeln!(output, "Failure output ({})", failed.len());
+    for output_item in failed {
+        let _ = writeln!(
+            output,
+            "{}:{}:{}",
+            output_item.project, output_item.workspace, output_item.task
+        );
+        append_stream_snippet(output, "stdout", &output_item.output.stdout);
+        append_stream_snippet(output, "stderr", &output_item.output.stderr);
+    }
+}
+
+fn append_stream_snippet(output: &mut String, label: &str, value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    let _ = writeln!(output, "  {label}:");
+    for line in value.lines().take(20) {
+        let _ = writeln!(output, "    {line}");
+    }
+}
+
+fn command_scope(command: &ProcessCommand) -> String {
+    match (&command.project, &command.workspace, &command.task) {
+        (Some(project), Some(workspace), Some(task)) => {
+            format!("{project}:{workspace}:{task}")
+        }
+        (Some(project), Some(workspace), None) => format!("{project}:{workspace}"),
+        (Some(project), None, Some(task)) => format!("{project}:{task}"),
+        (Some(project), None, None) => project.to_string(),
+        (None, None, Some(task)) => task.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+fn command_line(command: &ProcessCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(command.args.iter().map(String::as_str))
+        .map(shell_display_arg)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_display_arg(value: &str) -> String {
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
+    }) {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn json_field(value: &serde_json::Value, field: &str) -> String {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn severity_label(severity: &Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
 }
 
 fn write_json<T: serde::Serialize>(value: &T) -> Result<(), RepoctlError> {
@@ -1350,20 +1637,11 @@ fn render_error(error: &RepoctlError) -> ExitCode {
 
 fn render_stderr(diagnostics: &[Diagnostic]) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
+    let mut output = String::new();
     for diagnostic in diagnostics {
-        writeln!(
-            stderr,
-            "{} [{:?}]: {}",
-            diagnostic.code, diagnostic.severity, diagnostic.message
-        )?;
-        if let Some(source) = &diagnostic.source {
-            writeln!(stderr, "  at {}", source.path)?;
-        }
-        if let Some(help) = &diagnostic.help {
-            writeln!(stderr, "  help: {help}")?;
-        }
+        append_diagnostic(&mut output, diagnostic);
     }
-    Ok(())
+    stderr.write_all(output.as_bytes())
 }
 
 fn exit_for_diagnostics(diagnostics: &[Diagnostic]) -> ExitCode {
@@ -1379,6 +1657,8 @@ fn exit_for_diagnostics(diagnostics: &[Diagnostic]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use repoctl::TemplateSummary;
+
     use super::*;
 
     #[test]
@@ -1397,6 +1677,41 @@ mod tests {
 
         assert_eq!(root, PathBuf::from("."));
         Ok(())
+    }
+
+    #[test]
+    fn test_should_render_template_list_as_readable_table() {
+        let report = TemplateListReport {
+            templates: vec![TemplateSummary {
+                source: "builtin:app".to_string(),
+                name: "app".to_string(),
+                kind: "scaffold".to_string(),
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let output = format_template_list_human(&report);
+
+        assert!(output.contains("Available templates"));
+        assert!(output.contains("Source       Kind      Name"));
+        assert!(output.contains("builtin:app  scaffold  app"));
+        assert!(!output.contains('\t'));
+        assert!(output.contains("repoctl template render <source> --input name=<name>"));
+    }
+
+    #[test]
+    fn test_should_render_diagnostics_with_actionable_fields() {
+        let diagnostic = Diagnostic::error("template.source.invalid", "invalid source")
+            .with_path("templates/app/template.yaml")
+            .with_help("use builtin:<name> or local:<path>");
+        let mut output = String::new();
+
+        append_diagnostic(&mut output, &diagnostic);
+
+        assert!(output.contains("error: invalid source"));
+        assert!(output.contains("code: template.source.invalid"));
+        assert!(output.contains("path: templates/app/template.yaml"));
+        assert!(output.contains("help: use builtin:<name> or local:<path>"));
     }
 
     #[test]
