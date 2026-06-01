@@ -7,8 +7,8 @@ use crate::{
     diagnostic::{Diagnostic, RepoctlError},
     domain::{
         EdgeKind, GraphEdge, ProcessCommand, ProcessOutput, ProjectManifest, RepoGraph,
-        RepoRelativePath, RepoRoot, RepoSnapshot, TemplateManifest, WorkspaceLanguage,
-        WorkspaceSpec,
+        RepoRelativePath, RepoRoot, RepoSnapshot, ResolvedTemplateSource, TemplateManifest,
+        TemplateSource, WorkspaceLanguage, WorkspaceSpec,
     },
     manifest::ManifestSource,
 };
@@ -222,6 +222,35 @@ pub trait PolicyRule: Send + Sync {
 pub trait ProcessRunner: Send + Sync {
     /// Runs a command and captures output.
     fn run(&self, command: &ProcessCommand) -> Result<ProcessOutput, RepoctlError>;
+}
+
+/// Input passed to language-specific toolchain adapters.
+#[derive(Clone, Debug)]
+pub struct ToolchainEnvironmentInput<'a> {
+    /// Workspace requiring task environment setup.
+    pub workspace: &'a WorkspaceSpec,
+}
+
+/// Supplies task environment variables for one workspace language.
+pub trait ToolchainAdapter: Send + Sync {
+    /// Language handled by the adapter.
+    fn language(&self) -> WorkspaceLanguage;
+
+    /// Returns environment variables for the workspace.
+    fn environment(
+        &self,
+        input: &ToolchainEnvironmentInput<'_>,
+    ) -> Result<BTreeMap<String, String>, RepoctlError>;
+}
+
+/// Resolves built-in and repo-local template sources.
+pub trait TemplateSourceResolver: Send + Sync {
+    /// Resolves a template source into a manifest and source root.
+    fn resolve(
+        &self,
+        root: &RepoRoot,
+        source: &TemplateSource,
+    ) -> Result<ResolvedTemplateSource, RepoctlError>;
 }
 
 /// Template render request.

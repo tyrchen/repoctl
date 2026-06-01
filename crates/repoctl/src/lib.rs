@@ -10,11 +10,15 @@
 
 pub use repoctl_core::*;
 use repoctl_engine::RepoctlEngine;
+use repoctl_runner::RunnerService;
+use repoctl_scaffold::ScaffoldService;
 
 /// Typed repoctl facade.
 #[derive(Clone, Debug)]
 pub struct Repoctl {
     engine: RepoctlEngine,
+    scaffold: ScaffoldService,
+    runner: RunnerService,
     proto: ProtoFacade,
     iac: IacFacade,
     skills: SkillsFacade,
@@ -25,6 +29,8 @@ impl Repoctl {
     pub fn with_default_adapters() -> Result<Self, RepoctlError> {
         Ok(Self {
             engine: RepoctlEngine::with_default_adapters(),
+            scaffold: ScaffoldService::with_default_adapters(),
+            runner: RunnerService::with_default_adapters(),
             proto: ProtoFacade,
             iac: IacFacade,
             skills: SkillsFacade,
@@ -114,28 +120,40 @@ impl Repoctl {
     }
 
     /// Plans repository initialization.
-    pub fn init(&self, _request: InitRequest) -> Result<InitPlan, RepoctlError> {
-        unsupported("init is implemented in phase 4")
+    pub fn init(&self, request: InitRequest) -> Result<InitPlan, RepoctlError> {
+        self.scaffold.init(&request)
     }
 
     /// Plans a new project.
-    pub fn new_project(&self, _request: NewProjectRequest) -> Result<RenderPlan, RepoctlError> {
-        unsupported("new project commands are implemented in phase 5")
+    pub fn new_project(&self, request: NewProjectRequest) -> Result<RenderPlan, RepoctlError> {
+        let plan = self.scaffold.new_project(&request)?;
+        if !request.dry_run {
+            let report = self.validate_graph(GraphValidateRequest {
+                repo: request.repo,
+                changed_files: Vec::new(),
+            })?;
+            if !report.is_success() {
+                return Err(RepoctlError::Diagnostics {
+                    diagnostics: report.diagnostics,
+                });
+            }
+        }
+        Ok(plan)
     }
 
     /// Computes affected projects.
-    pub fn affected(&self, _request: AffectedRequest) -> Result<AffectedReport, RepoctlError> {
-        unsupported("affected analysis is implemented in phase 6")
+    pub fn affected(&self, request: AffectedRequest) -> Result<AffectedReport, RepoctlError> {
+        self.runner.affected(&request)
     }
 
     /// Runs a repo task.
-    pub fn run_task(&self, _request: TaskRunRequest) -> Result<TaskRunReport, RepoctlError> {
-        unsupported("task execution is implemented in phase 6")
+    pub fn run_task(&self, request: TaskRunRequest) -> Result<TaskRunReport, RepoctlError> {
+        self.runner.run_tasks(&request)
     }
 
     /// Builds a CI matrix.
-    pub fn ci_matrix(&self, _request: CiMatrixRequest) -> Result<CiMatrixReport, RepoctlError> {
-        unsupported("CI matrix generation is implemented in phase 6")
+    pub fn ci_matrix(&self, request: CiMatrixRequest) -> Result<CiMatrixReport, RepoctlError> {
+        self.runner.ci_matrix(&request)
     }
 
     /// Builds a PR summary.
@@ -192,8 +210,17 @@ pub struct SkillsFacade;
 
 impl SkillsFacade {
     /// Placeholder for skills command families.
-    pub fn check(&self, _request: SkillsFacadeRequest) -> Result<SkillsFacadeReport, RepoctlError> {
-        unsupported("skills commands are implemented in phase 4")
+    pub fn check(&self, request: SkillsFacadeRequest) -> Result<SkillsFacadeReport, RepoctlError> {
+        ScaffoldService::with_default_adapters().skills(&request)
+    }
+
+    /// Synchronizes generated skills.
+    pub fn sync(
+        &self,
+        mut request: SkillsFacadeRequest,
+    ) -> Result<SkillsFacadeReport, RepoctlError> {
+        request.sync = true;
+        ScaffoldService::with_default_adapters().skills(&request)
     }
 }
 

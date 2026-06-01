@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     fmt::{Display, Formatter},
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -788,6 +788,32 @@ pub struct TemplateManifest {
     pub post_render_validate: Vec<CommandSpec>,
 }
 
+/// Template source selector.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TemplateSource {
+    /// Built-in template by stable name.
+    Builtin {
+        /// Built-in template name.
+        name: String,
+    },
+    /// Repository-local template root.
+    Local {
+        /// Repo-relative template root.
+        root: RepoRelativePath,
+    },
+}
+
+/// Resolved template source and manifest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTemplateSource {
+    /// Source root used to resolve template files.
+    pub root: RepoRelativePath,
+    /// Parsed template manifest.
+    pub manifest: TemplateManifest,
+}
+
 /// Template input declaration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1074,6 +1100,9 @@ pub struct FileOperation {
     pub path: RepoRelativePath,
     /// Operation kind.
     pub operation: String,
+    /// UTF-8 content to write for file operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// Repository initialization plan.
@@ -1098,6 +1127,22 @@ pub struct NewProjectRequest {
     pub kind: ProjectKind,
     /// Project path.
     pub path: RepoRelativePath,
+    /// Requested stack entries such as `rust-api`, `bun-web`, and `uv-jobs`.
+    pub stack: Vec<String>,
+    /// Requested languages for framework/foundation generation.
+    pub languages: Vec<String>,
+    /// Requested public clients for foundation generation.
+    pub clients: Vec<String>,
+    /// Whether framework generation should include facade/internal areas.
+    pub facade: bool,
+    /// Optional `IaC` provider.
+    pub iac: Option<IacProvider>,
+    /// Optional proto package.
+    pub proto: Option<ProtoPackageName>,
+    /// Optional owner handle.
+    pub owner: Option<OwnerHandle>,
+    /// Whether to only plan writes.
+    pub dry_run: bool,
 }
 
 /// Render plan returned by project and template operations.
@@ -1116,8 +1161,14 @@ pub struct RenderPlan {
 pub struct AffectedRequest {
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
     /// Changed files.
     pub changed_files: Vec<RepoRelativePath>,
+    /// Requested task names for affected reports.
+    pub tasks: Vec<TaskName>,
 }
 
 /// Affected analysis report.
@@ -1128,8 +1179,30 @@ pub struct AffectedReport {
     pub directly_affected: Vec<ProjectName>,
     /// Transitively affected project ids.
     pub transitively_affected: Vec<ProjectName>,
+    /// Affected workspaces in `project:workspace` form.
+    pub workspaces: Vec<String>,
+    /// Affected task ids in `project:workspace:task` form.
+    pub tasks: Vec<String>,
+    /// Risk flags emitted by affected analysis.
+    pub risk_flags: Vec<String>,
+    /// Explainable reasons.
+    pub reasons: Vec<AffectedReason>,
+    /// Suggested reviewers.
+    pub suggested_reviewers: Vec<OwnerHandle>,
     /// Diagnostics.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Reason attached to an affected result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AffectedReason {
+    /// Changed or propagated source.
+    pub source: String,
+    /// Affected target.
+    pub target: String,
+    /// Human-readable explanation.
+    pub reason: String,
 }
 
 /// Request to run repo tasks.
@@ -1140,6 +1213,20 @@ pub struct TaskRunRequest {
     pub repo: Option<PathBuf>,
     /// Requested task names.
     pub tasks: Vec<TaskName>,
+    /// Optional project filter.
+    pub projects: Vec<ProjectName>,
+    /// Run only affected tasks.
+    pub affected: bool,
+    /// Changed files used when `affected` is true.
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Optional base git ref used when `affected` is true.
+    pub base: Option<String>,
+    /// Optional head git ref used when `affected` is true.
+    pub head: Option<String>,
+    /// Maximum task concurrency.
+    pub concurrency: Option<NonZeroU32>,
+    /// Plan tasks without executing them.
+    pub dry_run: bool,
 }
 
 /// Task run plan.
@@ -1156,16 +1243,46 @@ pub struct TaskRunPlan {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRunReport {
+    /// Planned task commands.
+    pub commands: Vec<ProcessCommand>,
+    /// Command outputs.
+    pub outputs: Vec<TaskCommandOutput>,
     /// Diagnostics.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Output from one task command.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCommandOutput {
+    /// Project id.
+    pub project: ProjectName,
+    /// Workspace id.
+    pub workspace: WorkspaceName,
+    /// Task id.
+    pub task: TaskName,
+    /// Process output.
+    pub output: ProcessOutput,
 }
 
 /// Process command passed to a runner.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessCommand {
+    /// Project id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectName>,
+    /// Workspace id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceName>,
+    /// Task id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskName>,
     /// Working directory.
     pub cwd: RepoRelativePath,
+    /// Absolute working directory for local execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absolute_cwd: Option<PathBuf>,
     /// Program.
     pub program: String,
     /// Arguments.
@@ -1192,6 +1309,14 @@ pub struct ProcessOutput {
 pub struct CiMatrixRequest {
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
+    /// Requested task names.
+    pub tasks: Vec<TaskName>,
+    /// Changed files used for affected CI matrix generation.
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
 }
 
 /// CI matrix report.
@@ -1200,6 +1325,8 @@ pub struct CiMatrixRequest {
 pub struct CiMatrixReport {
     /// JSON matrix entries.
     pub entries: Vec<serde_json::Value>,
+    /// GitHub Actions-safe matrix object.
+    pub github_actions: serde_json::Value,
 }
 
 /// Request for PR summary.
@@ -1272,6 +1399,10 @@ pub struct IacFacadeReport {
 pub struct SkillsFacadeRequest {
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
+    /// Whether to write missing or stale skills.
+    pub sync: bool,
+    /// Whether to only plan writes.
+    pub dry_run: bool,
 }
 
 /// Skills facade report placeholder.
