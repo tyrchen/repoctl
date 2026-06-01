@@ -1,8 +1,8 @@
 [package]
-name = "repoctl-server"
-description = """
-
-"""
+name = "repoctl"
+description = "Typed facade API for repoctl frontends."
+categories = ["development-tools"]
+keywords = ["monorepo", "cli", "facade"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -13,5 +13,7 @@ homepage.workspace = true
 
 [dependencies]
 repoctl-core.workspace = true
-anyhow.workspace = true
-tokio.workspace = true
+repoctl-engine.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

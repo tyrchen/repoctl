@@ -1,0 +1,23 @@
+[package]
+name = "repoctl-cli"
+description = "Command-line frontend for repoctl."
+categories = ["command-line-utilities", "development-tools"]
+keywords = ["monorepo", "cli"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "repoctl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+repoctl.workspace = true
+serde.workspace = true
+serde_json.workspace = true

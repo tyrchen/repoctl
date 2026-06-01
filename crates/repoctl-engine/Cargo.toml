@@ -1,10 +1,8 @@
 [package]
-name = "repoctl-core"
-description = """
-
-"""
+name = "repoctl-engine"
+description = "Discovery, graph construction, and policy evaluation services for repoctl."
 categories = ["development-tools"]
-keywords = []
+keywords = ["monorepo", "graph", "policy"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -15,12 +13,11 @@ homepage.workspace = true
 
 [dependencies]
 camino.workspace = true
+cargo_metadata.workspace = true
 globset.workspace = true
-schemars.workspace = true
-serde.workspace = true
+ignore.workspace = true
+repoctl-core.workspace = true
 serde_json.workspace = true
-serde_norway.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
