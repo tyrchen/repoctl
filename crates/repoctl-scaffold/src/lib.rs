@@ -1039,28 +1039,83 @@ fn skill_operations() -> Result<Vec<FileOperation>, RepoctlError> {
         (".agents/skills", AgentSurface::Codex),
         (".claude/skills", AgentSurface::Claude),
     ] {
-        operations.push(file_operation(
-            &format!("{root}/repoctl/SKILL.md"),
-            repoctl_skill(surface),
-        )?);
-        operations.push(file_operation(
-            &format!("{root}/monorepo-boundaries/SKILL.md"),
-            boundary_skill(surface),
-        )?);
-        operations.push(file_operation(
-            &format!("{root}/proto-change/SKILL.md"),
-            proto_skill(surface),
-        )?);
-        operations.push(file_operation(
-            &format!("{root}/app-creation/SKILL.md"),
-            app_creation_skill(surface),
-        )?);
-        operations.push(file_operation(
-            &format!("{root}/pr-review/SKILL.md"),
-            pr_review_skill(surface),
-        )?);
+        for spec in skill_specs(surface) {
+            operations.push(file_operation(
+                &format!("{root}/{}/SKILL.md", spec.name),
+                spec.content,
+            )?);
+            operations.push(file_operation(
+                &format!("{root}/{}/agents/openai.yaml", spec.name),
+                skill_agent_config(
+                    spec.display_name,
+                    spec.short_description,
+                    spec.default_prompt,
+                ),
+            )?);
+        }
     }
     Ok(operations)
+}
+
+#[derive(Debug)]
+struct GeneratedSkill {
+    name: &'static str,
+    display_name: &'static str,
+    short_description: &'static str,
+    default_prompt: &'static str,
+    content: String,
+}
+
+fn skill_specs(surface: AgentSurface) -> Vec<GeneratedSkill> {
+    vec![
+        GeneratedSkill {
+            name: "repoctl",
+            display_name: "Repoctl",
+            short_description: "Use repoctl graph, affected, context, and task workflows",
+            default_prompt: "Use the repoctl skill to inspect the monorepo graph, compute \
+                             affected work, run scoped tasks, and generate agent context before \
+                             editing boundaries.",
+            content: repoctl_skill(surface),
+        },
+        GeneratedSkill {
+            name: "monorepo-boundaries",
+            display_name: "Monorepo Boundaries",
+            short_description: "Keep app, framework, foundation, proto, IaC, and generated-code \
+                                boundaries intact",
+            default_prompt: "Use the monorepo-boundaries skill to classify changed paths, confirm \
+                             ownership, and prevent cross-project dependency or generated-code \
+                             mistakes.",
+            content: boundary_skill(surface),
+        },
+        GeneratedSkill {
+            name: "proto-change",
+            display_name: "Proto Change",
+            short_description: "Change protobuf contracts through owners and consumers",
+            default_prompt: "Use the proto-change skill to locate proto ownership, check \
+                             consumers, update source contracts, and regenerate or validate \
+                             outputs through repoctl.",
+            content: proto_skill(surface),
+        },
+        GeneratedSkill {
+            name: "app-creation",
+            display_name: "App Creation",
+            short_description: "Create apps, frameworks, and foundation services from usable \
+                                monorepo templates",
+            default_prompt: "Use the app-creation skill to scaffold new projects with repoctl, \
+                             choose the correct project kind, and verify manifests, tasks, docs, \
+                             and boundaries.",
+            content: app_creation_skill(surface),
+        },
+        GeneratedSkill {
+            name: "pr-review",
+            display_name: "PR Review",
+            short_description: "Review monorepo pull requests with affected analysis and risk \
+                                flags",
+            default_prompt: "Use the pr-review skill to summarize impact, identify owners, check \
+                             risky paths, and select the smallest meaningful verification gates.",
+            content: pr_review_skill(surface),
+        },
+    ]
 }
 
 fn skill_content(name: &str, description: &str, body: &str, surface: AgentSurface) -> String {
@@ -1074,11 +1129,23 @@ description: "{description}"
 
 # {name}
 
-This skill is generated for {product}. Keep it synchronized with `repoctl skills sync`.
+This skill is generated for {product}. Keep it synchronized with `repoctl skills sync`. It is
+intended to be directly usable after `repoctl init`; teams should tune owners, commands, and local
+exceptions rather than replacing the workflow with a placeholder.
 
 {body}
 "#,
         product = surface.product_name(),
+    )
+}
+
+fn skill_agent_config(display_name: &str, short_description: &str, default_prompt: &str) -> String {
+    format!(
+        r#"interface:
+  display_name: "{display_name}"
+  short_description: "{short_description}"
+  default_prompt: "{default_prompt}"
+"#
     )
 }
 
@@ -1087,17 +1154,83 @@ fn repoctl_skill(surface: AgentSurface) -> String {
         "repoctl",
         "Use repoctl as the source of truth for monorepo graph, affected, CI, context, and task \
          workflows.",
-        r#"## When to use
+        r#"## When this fires
 
-Use this skill before changing project layout, manifests, generated files, CI selection, or AI context.
+- Before changing `repo.yaml`, any `project.yaml`, generated files, CI selection, task wiring, or
+  agent context.
+- When the user asks which projects are affected, which checks to run, or why CI picked a matrix.
+- When a change crosses app, framework, foundation, proto, IaC, or skill boundaries.
+- Before using broad package-manager commands in a large repo.
+
+If the repository has no `repo.yaml`, do not guess the graph. Run `repoctl init --dry-run` only when
+the user is asking to adopt repoctl; otherwise inspect the existing repo layout manually.
+
+## What to produce
+
+- A short statement of the relevant project(s), owners, and changed surfaces.
+- The exact repoctl commands used, with `--format json` when the result feeds automation.
+- A scoped verification recommendation: affected tasks first, broader gates only when the diff
+  changes shared policy, templates, or graph code.
 
 ## Workflow
 
-1. Find the repository root with `repoctl graph validate --format human`.
-2. Inspect affected work with `repoctl affected --base origin/main --head HEAD --tasks check,test`.
-3. Use `repoctl run <task> --affected --dry-run` before running expensive tasks.
-4. Prefer `--format json` for automation and CI.
-5. Do not bypass repoctl diagnostics by hand-editing generated state.
+1. **Anchor on the graph**:
+
+   ```bash
+   repoctl graph validate --format human
+   ```
+
+   Treat errors as blockers. Fix stale manifests, invalid paths, duplicate project names, or broken
+   dependencies before editing code that relies on the graph.
+
+2. **Explain the target**:
+
+   ```bash
+   repoctl explain <project-name>
+   ```
+
+   Use this before changing a project manifest, dependency, task, proto ownership, IaC root, deploy
+   environment, or AI editable area.
+
+3. **Compute impact**:
+
+   ```bash
+   repoctl affected --base origin/main --head HEAD --tasks check,test,build --format human
+   ```
+
+   Use the merge-base or PR base that matches the review target. If `origin/main` is not the target
+   branch, name the actual base explicitly in the hand-off.
+
+4. **Dry-run expensive work**:
+
+   ```bash
+   repoctl run check --affected --dry-run
+   repoctl run test --affected --dry-run
+   ```
+
+   Run the real tasks only after the dry-run confirms the intended project set.
+
+5. **Generate agent context only when it helps**:
+
+   ```bash
+   repoctl context <project-name> --format json
+   ```
+
+   Use context packs for multi-file edits or unfamiliar ownership. Do not treat generated context as
+   a replacement for reading the source files that will be changed.
+
+## Quality bar
+
+- Do not hand-edit generated state to silence repoctl diagnostics.
+- Do not substitute package-manager commands for repoctl affected analysis when the question is impact.
+- Do broaden to repo-wide checks when `repo.yaml`, templates, skills, root CI, or graph validation
+  logic changes.
+- Final responses should name skipped heavyweight gates and why they were not relevant.
+
+## Hand-off
+
+Report the graph status, affected projects, selected commands, and any owner or boundary concerns.
+If diagnostics remain, stop and show the concrete diagnostic rather than claiming the repo is ready.
 "#,
         surface,
     )
@@ -1107,18 +1240,81 @@ fn boundary_skill(surface: AgentSurface) -> String {
     skill_content(
         "monorepo-boundaries",
         "Respect app, framework, foundation, proto, generated-code, and IaC boundaries.",
-        r#"## Boundary rules
+        r#"## When this fires
+
+- A change touches imports, package manifests, workspace membership, generated code, proto ownership,
+  IaC, deployment config, or multiple project roots.
+- The user asks whether code should live in an app, framework, foundation service, proto root, or
+  core infrastructure.
+- A review includes app-to-app imports, framework internals, source proto edits, or production IaC.
+
+## Boundary model
 
 - Apps may depend on framework facades and foundation clients, not on other apps.
 - Framework internals are private. Consumers use the facade paths declared in `project.yaml`.
 - Foundation services expose public clients and owned contracts; business apps do not import service internals.
 - Source protos live under `protos/`. Generated code is consumer-local output.
 - App IaC is colocated under the app; shared infrastructure lives under `core-infra/`.
+- Generated files are build artifacts. Source changes happen in source roots, templates, or proto
+  definitions.
 
-## Checks
+## Workflow
 
-Run `repoctl graph validate` after changing manifests or dependencies.
-Run `repoctl lint-boundaries --changed-file <path>` for narrow path checks.
+1. **Classify the changed path**:
+
+   - `apps/<name>/` - product or domain application.
+   - `frameworks/<name>/` - shared capability with public facade and private internals.
+   - `foundations/<name>/` - platform service plus public clients.
+   - `protos/` - source contracts owned by declared packages.
+   - `core-infra/` - shared infrastructure.
+   - `.agents/skills/`, `.claude/skills/`, `templates/`, `.github/` - repo-wide policy or tooling.
+
+2. **Read the nearest manifest**:
+
+   ```bash
+   repoctl explain <project-name>
+   ```
+
+   If a path has no owning project and is not intentionally repo-wide, fix ownership before adding
+   more files.
+
+3. **Check dependency direction**:
+
+   ```bash
+   repoctl graph validate
+   repoctl lint-boundaries --changed-file <path>
+   ```
+
+   Apps can call framework facades and foundation clients. Framework internals and service internals
+   are not public API unless declared as facades or clients.
+
+4. **Choose the right home for new code**:
+
+   - Put product-specific behavior in an app.
+   - Put reusable business capability behind a framework facade.
+   - Put shared runtime/platform service ownership in a foundation service.
+   - Put cross-cutting infrastructure in `core-infra/`.
+   - Put contracts in `protos/` and generated outputs under consumer workspaces.
+
+5. **Verify ownership after edits**:
+
+   ```bash
+   repoctl affected --base origin/main --head HEAD --tasks check,test
+   ```
+
+## Review checklist
+
+- No app imports another app's internals.
+- No app imports a framework internal package directly.
+- No generated file is edited as the source of truth.
+- Production IaC and deploy files have the owning team called out.
+- Manifest changes include owners, tasks, workspaces, and AI editable/do-not-edit areas where
+  relevant.
+
+## Hand-off
+
+Name the owning project, why the chosen directory is correct, which boundary checks ran, and any
+owner review required before merge.
 "#,
         surface,
     )
@@ -1128,13 +1324,69 @@ fn proto_skill(surface: AgentSurface) -> String {
     skill_content(
         "proto-change",
         "Change source proto contracts through owners and never edit generated code directly.",
-        r#"## Workflow
+        r#"## When this fires
 
-1. Locate ownership with `repoctl proto owners <package-or-path>`.
-2. Locate consumers with `repoctl proto consumers <package-or-path>`.
-3. Edit only source files under `protos/` unless a project manifest explicitly owns another source root.
-4. Do not edit generated code under `generated/`, `gen/`, or language-specific generated directories.
-5. Run `repoctl proto check --base origin/main --head HEAD` before review.
+- The user changes `.proto` files, generated clients, API contracts, event schemas, or service
+  package ownership.
+- A generated file appears in the diff and it is unclear whether it should be regenerated or left
+  untouched.
+- A PR may break consumers of a foundation service or cross-language client.
+
+## Source of truth
+
+The source contract lives under `protos/` unless a `project.yaml` explicitly declares another proto
+source root. Generated code is consumer-local output and should not be edited to change behavior.
+
+## Workflow
+
+1. **Find owners and consumers**:
+
+   ```bash
+   repoctl proto owners <package-or-path>
+   repoctl proto consumers <package-or-path>
+   ```
+
+   If ownership is missing, update the owning project manifest before changing the contract.
+
+2. **Read the package context**:
+
+   - package name and versioning convention,
+   - service and message consumers,
+   - generated language targets,
+   - backwards-compatibility rules in the owning project docs.
+
+3. **Edit source only**:
+
+   Change `protos/**` or the manifest-declared source root. Do not patch `generated/`, `gen/`,
+   checked-in language clients, or build output as a substitute for changing the contract.
+
+4. **Preserve compatibility unless the user explicitly requests a breaking change**:
+
+   - Add fields instead of renaming or reusing numbers.
+   - Reserve removed field numbers and names.
+   - Keep package names stable.
+   - Check JSON names and language-specific reserved words when adding public fields.
+
+5. **Run the proto gate**:
+
+   ```bash
+   repoctl proto check --base origin/main --head HEAD
+   repoctl affected --base origin/main --head HEAD --tasks check,test
+   ```
+
+   If the repo has a declared generation task, run it through `repoctl run` for affected consumers.
+
+## Review checklist
+
+- Owner and consumer lists are included in the PR summary.
+- Breaking changes are explicit, justified, and routed to consumers.
+- Generated output is either absent from the diff or produced by the repo's generation task.
+- Affected app/framework/foundation tasks cover every consumer repoctl reports.
+
+## Hand-off
+
+State the package changed, owners, consumers, compatibility impact, generation status, and commands
+run. If a consumer cannot be tested locally, name it as a residual risk.
 "#,
         surface,
     )
@@ -1145,16 +1397,71 @@ fn app_creation_skill(surface: AgentSurface) -> String {
         "app-creation",
         "Create new apps, frameworks, and foundation services with repoctl templates and \
          manifests.",
-        r#"## Workflow
+        r#"## When this fires
 
-Use `repoctl new app <name>`, `repoctl new framework <name>`, or `repoctl new foundation <name>` instead of hand-creating project roots.
+- The user asks for a new service, app, framework, shared library, client, worker, or foundation
+  capability inside the monorepo.
+- A new directory under `apps/`, `frameworks/`, or `foundations/` is needed.
+- The user is tempted to copy an existing project by hand.
 
-After scaffolding:
+## Choose the project kind
 
-1. Review `project.yaml` owners, workspaces, tasks, proto, IaC, and AI editable areas.
-2. Replace example code with domain code while preserving the generated task shape.
-3. Run `repoctl graph validate`.
-4. Run the project tasks listed in `project.yaml`.
+- **App**: product/domain behavior deployed independently. It may use framework facades and
+  foundation clients.
+- **Framework**: reusable capability for apps. Public facade is stable; internals stay private.
+- **Foundation service**: platform-owned service with public clients and optional proto ownership.
+
+If the requested code is shared but has no runtime service, prefer a framework. If it owns a
+contract or platform runtime, prefer a foundation service.
+
+## Workflow
+
+1. **Pick the scaffold command**:
+
+   ```bash
+   repoctl new app apps/<name> --stack rust-api,bun-web
+   repoctl new framework frameworks/<name> --languages rust,typescript
+   repoctl new foundation foundations/<name> --clients rust,typescript,python --proto <package>
+   ```
+
+   Include `--iac pulumi`, `--iac terraform`, or `--iac opentofu` only when the project actually
+   deploys infrastructure.
+
+2. **Review generated metadata before adding domain code**:
+
+   - `project.yaml`: name, kind, owners, workspaces, tasks, proto ownership, IaC, deploy roots.
+   - `README.md`: local commands and boundary notes.
+   - `AGENTS.md` / `CLAUDE.md`: project-local edit constraints.
+   - source files: runnable starter code and tests, not placeholders.
+
+3. **Make the generated project immediately useful**:
+
+   Replace example names with domain language, keep the task names (`check`, `test`, `build`) stable,
+   and add missing owner handles. Do not remove privacy settings such as `publish = false` or
+   `"private": true` unless the repo policy explicitly permits publishing.
+
+4. **Validate the result**:
+
+   ```bash
+   repoctl graph validate
+   repoctl run check --project <project-name> --dry-run
+   repoctl run test --project <project-name> --dry-run
+   ```
+
+   Run the real project tasks after the dry-run shows the expected workspaces.
+
+## Review checklist
+
+- The project kind matches the ownership model.
+- Manifest owners and task commands are real, not example placeholders.
+- Generated packages are private and internal by default.
+- Project docs and agent instructions point to the correct project name and path.
+- The first commit leaves `repoctl graph validate` green.
+
+## Hand-off
+
+Report the command used, generated project name, owner fields that still need team-specific tuning,
+and the validation commands run.
 "#,
         surface,
     )
@@ -1164,12 +1471,79 @@ fn pr_review_skill(surface: AgentSurface) -> String {
     skill_content(
         "pr-review",
         "Summarize PR impact using repoctl affected data, risk flags, and graph diagnostics.",
-        r#"## Workflow
+        r#"## When this fires
 
-1. Run `repoctl pr summary --base origin/main --head HEAD`.
-2. Check risk flags before approving production, proto, generated-code, or IaC changes.
-3. Use `repoctl affected --base origin/main --head HEAD --tasks check,test,build` to confirm the intended test surface.
-4. Ask for owners listed by repoctl when a change crosses project or production boundaries.
+- The user asks for a PR review, impact summary, CI explanation, or merge readiness check.
+- The diff touches multiple projects, manifests, proto contracts, generated code, IaC, deploy files,
+  templates, skills, or repo-wide CI.
+- A CI matrix or affected-project list needs to be justified.
+
+## Review stance
+
+Prioritize correctness, boundary regressions, missing tests, ownership gaps, and CI blind spots.
+Summaries come after findings. Do not approve a risky diff just because the changed code is small.
+
+## Workflow
+
+1. **Validate the graph first**:
+
+   ```bash
+   repoctl graph validate
+   ```
+
+   A broken graph makes affected analysis untrustworthy.
+
+2. **Summarize PR impact**:
+
+   ```bash
+   repoctl pr summary --base origin/main --head HEAD --format human
+   ```
+
+   Use the actual PR base branch when it is not `origin/main`.
+
+3. **Compute verification surface**:
+
+   ```bash
+   repoctl affected --base origin/main --head HEAD --tasks check,test,build --format human
+   ```
+
+   Compare this with the checks that actually ran. Missing affected tasks are findings, not
+   footnotes.
+
+4. **Inspect risky paths**:
+
+   - `repo.yaml`, `.github/`, `templates/`, `.agents/skills/`, `.claude/skills/` affect the repo.
+   - `protos/` can break consumers even when source compiles.
+   - `generated/` or `gen/` should usually be regenerated, not manually patched.
+   - `deploy/prod/`, `iac/stacks/prod/`, and shared `core-infra/` need owner review.
+
+5. **Review changed code in owner context**:
+
+   Use `repoctl explain <project-name>` for each affected project before deciding whether the
+   change respects facades, clients, and editable areas.
+
+## Finding format
+
+Lead with findings ordered by severity:
+
+```text
+P1 path/to/file:123 - The change bypasses the framework facade and imports an internal crate.
+Fix: move the shared API to the facade package or keep the dependency inside the owning framework.
+```
+
+If there are no findings, say so clearly and name residual risks or skipped gates.
+
+## Quality bar
+
+- Every finding cites a file and line when possible.
+- Every requested gate maps to an affected project or repo-wide surface.
+- Owner review is explicit for production IaC, proto breaking changes, and framework internals.
+- Do not replace code review with repoctl output; repoctl scopes the review, it does not perform it.
+
+## Hand-off
+
+Return findings first, then affected projects, risk flags, commands run, and any verification gap
+that remains before merge.
 "#,
         surface,
     )
@@ -1479,6 +1853,9 @@ fn builtin_template_manifest(name: &str) -> Result<String, RepoctlError> {
             r#"  - source: SKILL.md.j2
     target: ".agents/skills/{{ name }}/SKILL.md"
     mode: managed
+  - source: openai.yaml.j2
+    target: ".agents/skills/{{ name }}/agents/openai.yaml"
+    mode: managed
 "#
         }
         _ => {
@@ -1542,17 +1919,55 @@ description: "Repository-local workflow for {{{{ name }}}}."
 
 # {{{{ name }}}}
 
-Use this local skill for repository-specific automation in this private monorepo.
+Use this local skill for a repository-specific workflow in this private monorepo. Replace the
+example sections with concrete triggers, commands, quality gates, and hand-off notes before relying
+on it in reviews.
+
+## When this fires
+
+- A user asks for the {{{{ name }}}} workflow by name.
+- A task touches files, ownership, or policy that this workflow owns.
+- Another skill needs this workflow as a prerequisite and no more specific local skill applies.
+
+## What to produce
+
+- The exact files, projects, or owners this workflow affects.
+- Commands run and why they were the smallest meaningful checks.
+- Any residual risk, skipped gate, or owner decision still needed.
 
 ## Workflow
 
-1. Read `repo.yaml` and the nearest `project.yaml` before editing files.
-2. Keep changes inside the owning project unless repoctl affected analysis identifies a wider impact.
-3. Run `repoctl graph validate` after structural or manifest changes.
-4. Run `repoctl affected --base origin/main --head HEAD --tasks check,test` before review.
-5. Escalate to the project owners listed in `project.yaml` when the change touches production IaC, proto contracts, generated-code policy, or cross-project dependencies.
+1. **Bind the scope** - read `repo.yaml`, the nearest `project.yaml`, and any docs or specs that
+   define this workflow.
+2. **Identify ownership** - run `repoctl explain <project-name>` when the work is project-scoped.
+3. **Make the change** - stay inside the owning project unless repoctl affected analysis identifies a
+   wider impact.
+4. **Validate structure** - run `repoctl graph validate` after structural, manifest, template,
+   skill, or CI changes.
+5. **Validate behavior** - run `repoctl affected --base origin/main --head HEAD --tasks check,test`
+   before review, then execute the affected tasks that match the changed surface.
+6. **Escalate deliberately** - call out owners when the change touches production IaC, proto
+   contracts, generated-code policy, or cross-project dependencies.
+
+## Quality bar
+
+- No placeholder owners, commands, or unfinished markers remain in the generated workflow.
+- Every command in the hand-off maps to a changed surface.
+- Generated or managed files are changed through their source template or generator.
+- The final response names any gate that was intentionally skipped.
+
+## Hand-off
+
+Report the owning project or repo-wide surface, commands run, findings, and next action. If a
+required owner decision is missing, stop and ask for it instead of inventing policy.
 "#
         )),
+        "openai.yaml.j2" => Ok(r#"interface:
+  display_name: "{{ name }}"
+  short_description: "Run the {{ name }} repository workflow"
+  default_prompt: "Use the {{ name }} skill to bind scope, inspect repoctl ownership, make the requested change, run scoped verification, and hand off residual risk."
+"#
+        .to_string()),
         _ => Err(RepoctlError::diagnostic(
             Diagnostic::error(
                 "template.builtin.source_missing",
@@ -2358,7 +2773,17 @@ mod tests {
         );
         assert!(
             temp.path()
+                .join(".agents/skills/repoctl/agents/openai.yaml")
+                .is_file()
+        );
+        assert!(
+            temp.path()
                 .join(".claude/skills/pr-review/SKILL.md")
+                .is_file()
+        );
+        assert!(
+            temp.path()
+                .join(".claude/skills/pr-review/agents/openai.yaml")
                 .is_file()
         );
         assert!(temp.path().join("apps").is_dir());
@@ -2411,7 +2836,16 @@ mod tests {
         let skill =
             fs::read_to_string(temp.path().join(".agents/skills/repoctl/SKILL.md")).expect("skill");
         assert!(skill.contains("name: \"repoctl\""));
+        assert!(skill.contains("## When this fires"));
+        assert!(skill.contains("## Quality bar"));
         assert!(skill.contains("repoctl affected"));
+        let config = fs::read_to_string(
+            temp.path()
+                .join(".agents/skills/repoctl/agents/openai.yaml"),
+        )
+        .expect("agent config");
+        assert!(config.contains("display_name: \"Repoctl\""));
+        assert!(config.contains("default_prompt:"));
     }
 
     #[test]
@@ -2615,5 +3049,40 @@ mod tests {
             .expect("resolve");
         assert_eq!(template.manifest.schema.as_str(), "repoctl.template/v1");
         assert_eq!(template.root.as_str(), "templates/builtin/app");
+    }
+
+    #[test]
+    fn test_should_resolve_builtin_skills_template_with_agent_config() {
+        let resolver = DefaultTemplateSourceResolver::default();
+        let root = RepoRoot {
+            absolute: camino::Utf8PathBuf::from("/tmp/repoctl-template-test"),
+        };
+        let template = resolver
+            .resolve(
+                &root,
+                &TemplateSource::Builtin {
+                    name: "skills".to_string(),
+                },
+            )
+            .expect("resolve");
+        assert!(
+            template
+                .manifest
+                .files
+                .iter()
+                .any(|file| file.target == ".agents/skills/{{ name }}/SKILL.md")
+        );
+        assert!(
+            template
+                .manifest
+                .files
+                .iter()
+                .any(|file| file.target == ".agents/skills/{{ name }}/agents/openai.yaml")
+        );
+        let skill = builtin_template_file_content("skills", "SKILL.md.j2").expect("skill");
+        assert!(skill.contains("## When this fires"));
+        assert!(skill.contains("## Quality bar"));
+        let config = builtin_template_file_content("skills", "openai.yaml.j2").expect("config");
+        assert!(config.contains("default_prompt:"));
     }
 }
