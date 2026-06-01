@@ -1155,6 +1155,50 @@ pub struct RenderPlan {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Template listing request.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateListRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+}
+
+/// Template summary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateSummary {
+    /// Template source label.
+    pub source: String,
+    /// Template name.
+    pub name: String,
+    /// Template kind.
+    pub kind: String,
+}
+
+/// Template listing report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateListReport {
+    /// Available templates.
+    pub templates: Vec<TemplateSummary>,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Template render request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateRenderRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Source to render.
+    pub source: TemplateSource,
+    /// JSON input values.
+    pub inputs: serde_json::Value,
+    /// Whether to only plan writes.
+    pub dry_run: bool,
+}
+
 /// Request for affected analysis.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1215,6 +1259,8 @@ pub struct TaskRunRequest {
     pub tasks: Vec<TaskName>,
     /// Optional project filter.
     pub projects: Vec<ProjectName>,
+    /// Optional workspace filter in `project:workspace` form.
+    pub workspaces: Vec<String>,
     /// Run only affected tasks.
     pub affected: bool,
     /// Changed files used when `affected` is true.
@@ -1335,6 +1381,12 @@ pub struct CiMatrixReport {
 pub struct PrSummaryRequest {
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
+    /// Explicit changed files.
+    pub changed_files: Vec<RepoRelativePath>,
 }
 
 /// PR summary report.
@@ -1343,14 +1395,20 @@ pub struct PrSummaryRequest {
 pub struct PrSummary {
     /// Markdown body.
     pub markdown: String,
+    /// Machine-readable impact payload.
+    pub impact: serde_json::Value,
 }
 
 /// Request for AI context.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiContextRequest {
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
+    /// Project to build context for.
+    pub project: ProjectName,
+    /// Context audience.
+    pub audience: String,
 }
 
 /// AI context report.
@@ -1361,18 +1419,70 @@ pub struct AiContext {
     pub payload: serde_json::Value,
 }
 
+/// Generated-code check request.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodegenCheckRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
+    /// Explicit changed files.
+    pub changed_files: Vec<RepoRelativePath>,
+}
+
+/// Generated-code check report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodegenCheckReport {
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 /// Proto facade request placeholder.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtoFacadeRequest {
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
+    /// Proto operation.
+    pub operation: ProtoOperation,
+    /// Proto path or package selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Optional base git ref for changed-file checks.
+    pub base: Option<String>,
+    /// Optional head git ref for changed-file checks.
+    pub head: Option<String>,
+    /// Explicit changed files for generated-code policy checks.
+    pub changed_files: Vec<RepoRelativePath>,
 }
 
-/// Proto facade report placeholder.
+/// Proto operation.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProtoOperation {
+    /// Check proto toolchain and generated-code policy.
+    #[default]
+    Check,
+    /// Find owners for a proto path.
+    Owners,
+    /// Find consumers for a proto path or package.
+    Consumers,
+}
+
+/// Proto facade report.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtoFacadeReport {
+    /// Matching owner projects.
+    pub owners: Vec<ProjectName>,
+    /// Matching consumer projects.
+    pub consumers: Vec<ProjectName>,
+    /// Commands planned or executed by proto toolchains.
+    pub commands: Vec<ProcessCommand>,
     /// Diagnostics.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -1383,12 +1493,34 @@ pub struct ProtoFacadeReport {
 pub struct IacFacadeRequest {
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
+    /// Plan only affected `IaC` targets.
+    pub affected: bool,
+    /// Explicit project selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectName>,
+    /// Environment or stack name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    /// Plan core infrastructure.
+    pub core: bool,
+    /// Optional base git ref for affected selection.
+    pub base: Option<String>,
+    /// Optional head git ref for affected selection.
+    pub head: Option<String>,
+    /// Explicit changed files for affected selection and risk classification.
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Plan without executing provider commands.
+    pub dry_run: bool,
 }
 
-/// `IaC` facade report placeholder.
+/// `IaC` facade report.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IacFacadeReport {
+    /// Provider plan commands.
+    pub commands: Vec<ProcessCommand>,
+    /// Risk flags.
+    pub risk_flags: Vec<String>,
     /// Diagnostics.
     pub diagnostics: Vec<Diagnostic>,
 }

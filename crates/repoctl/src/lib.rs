@@ -31,8 +31,12 @@ impl Repoctl {
             engine: RepoctlEngine::with_default_adapters(),
             scaffold: ScaffoldService::with_default_adapters(),
             runner: RunnerService::with_default_adapters(),
-            proto: ProtoFacade,
-            iac: IacFacade,
+            proto: ProtoFacade {
+                runner: RunnerService::with_default_adapters(),
+            },
+            iac: IacFacade {
+                runner: RunnerService::with_default_adapters(),
+            },
             skills: SkillsFacade,
         })
     }
@@ -156,14 +160,38 @@ impl Repoctl {
         self.runner.ci_matrix(&request)
     }
 
+    /// Lists available templates.
+    pub fn template_list(
+        &self,
+        request: TemplateListRequest,
+    ) -> Result<TemplateListReport, RepoctlError> {
+        self.scaffold.list_templates(&request)
+    }
+
+    /// Renders a template.
+    pub fn template_render(
+        &self,
+        request: TemplateRenderRequest,
+    ) -> Result<RenderPlan, RepoctlError> {
+        self.scaffold.render_template(&request)
+    }
+
+    /// Checks generated-code direct edits.
+    pub fn codegen_check(
+        &self,
+        request: CodegenCheckRequest,
+    ) -> Result<CodegenCheckReport, RepoctlError> {
+        self.runner.codegen_check(&request)
+    }
+
     /// Builds a PR summary.
-    pub fn pr_summary(&self, _request: PrSummaryRequest) -> Result<PrSummary, RepoctlError> {
-        unsupported("PR summaries are implemented in phase 8")
+    pub fn pr_summary(&self, request: PrSummaryRequest) -> Result<PrSummary, RepoctlError> {
+        self.runner.pr_summary(&request)
     }
 
     /// Builds AI context.
-    pub fn ai_context(&self, _request: AiContextRequest) -> Result<AiContext, RepoctlError> {
-        unsupported("AI context is implemented in phase 8")
+    pub fn ai_context(&self, request: AiContextRequest) -> Result<AiContext, RepoctlError> {
+        self.runner.ai_context(&request)
     }
 
     /// Returns the proto facade.
@@ -184,23 +212,54 @@ impl Repoctl {
 
 /// Proto command facade.
 #[derive(Clone, Debug, Default)]
-pub struct ProtoFacade;
+pub struct ProtoFacade {
+    runner: RunnerService,
+}
 
 impl ProtoFacade {
-    /// Placeholder for proto command families.
-    pub fn check(&self, _request: ProtoFacadeRequest) -> Result<ProtoFacadeReport, RepoctlError> {
-        unsupported("proto commands are implemented in phase 7")
+    /// Runs a proto command family.
+    pub fn run(&self, request: ProtoFacadeRequest) -> Result<ProtoFacadeReport, RepoctlError> {
+        self.runner.proto(&request)
+    }
+
+    /// Checks proto toolchain and generated-code policy.
+    pub fn check(
+        &self,
+        mut request: ProtoFacadeRequest,
+    ) -> Result<ProtoFacadeReport, RepoctlError> {
+        request.operation = ProtoOperation::Check;
+        self.runner.proto(&request)
+    }
+
+    /// Looks up proto owners.
+    pub fn owners(
+        &self,
+        mut request: ProtoFacadeRequest,
+    ) -> Result<ProtoFacadeReport, RepoctlError> {
+        request.operation = ProtoOperation::Owners;
+        self.runner.proto(&request)
+    }
+
+    /// Looks up proto consumers.
+    pub fn consumers(
+        &self,
+        mut request: ProtoFacadeRequest,
+    ) -> Result<ProtoFacadeReport, RepoctlError> {
+        request.operation = ProtoOperation::Consumers;
+        self.runner.proto(&request)
     }
 }
 
 /// `IaC` command facade.
 #[derive(Clone, Debug, Default)]
-pub struct IacFacade;
+pub struct IacFacade {
+    runner: RunnerService,
+}
 
 impl IacFacade {
-    /// Placeholder for `IaC` command families.
-    pub fn plan(&self, _request: IacFacadeRequest) -> Result<IacFacadeReport, RepoctlError> {
-        unsupported("IaC plan is implemented in phase 9")
+    /// Plans `IaC` provider commands.
+    pub fn plan(&self, request: IacFacadeRequest) -> Result<IacFacadeReport, RepoctlError> {
+        self.runner.iac_plan(&request)
     }
 }
 
@@ -224,18 +283,15 @@ impl SkillsFacade {
     }
 }
 
-fn unsupported<T>(message: &'static str) -> Result<T, RepoctlError> {
-    Err(RepoctlError::diagnostic(Diagnostic::error(
-        "repoctl.unsupported_phase",
-        message,
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
 
-    use super::{DiscoverRequest, GraphValidateRequest, Repoctl};
+    use super::{
+        AiContextRequest, CodegenCheckRequest, DiscoverRequest, GraphValidateRequest,
+        IacFacadeRequest, PrSummaryRequest, ProjectName, ProtoFacadeRequest, ProtoOperation,
+        RepoRelativePath, Repoctl, TemplateListRequest, TemplateRenderRequest, TemplateSource,
+    };
 
     #[test]
     fn test_should_discover_through_facade() {
@@ -266,6 +322,128 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code.as_ref() == "policy.cross_app_dependency")
+        );
+    }
+
+    #[test]
+    fn test_should_resolve_proto_through_facade() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_phase789_fixture(temp.path());
+        let facade = Repoctl::with_default_adapters().expect("facade");
+        let report = facade
+            .proto()
+            .owners(ProtoFacadeRequest {
+                repo: Some(temp.path().to_path_buf()),
+                operation: ProtoOperation::Owners,
+                selector: Some("protos/acme/identity/v1/identity.proto".to_string()),
+                base: None,
+                head: None,
+                changed_files: Vec::new(),
+            })
+            .expect("proto owners");
+        assert!(
+            report
+                .owners
+                .iter()
+                .any(|owner| owner.as_str() == "foundations.identity")
+        );
+    }
+
+    #[test]
+    fn test_should_build_ai_context_and_pr_summary_through_facade() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_phase789_fixture(temp.path());
+        let facade = Repoctl::with_default_adapters().expect("facade");
+        let context = facade
+            .ai_context(AiContextRequest {
+                repo: Some(temp.path().to_path_buf()),
+                project: ProjectName::new("apps.catalog").expect("project"),
+                audience: "ai".to_string(),
+            })
+            .expect("context");
+        assert_eq!(context.payload["project"], "apps.catalog");
+        let summary = facade
+            .pr_summary(PrSummaryRequest {
+                repo: Some(temp.path().to_path_buf()),
+                base: None,
+                head: None,
+                changed_files: vec![
+                    RepoRelativePath::new("apps/catalog/iac/stacks/prod.yaml").expect("path"),
+                ],
+            })
+            .expect("summary");
+        assert!(summary.markdown.contains("prod-iac"));
+        assert_eq!(summary.impact["affected"]["riskFlags"][0], "prod-iac");
+    }
+
+    #[test]
+    fn test_should_plan_iac_through_facade() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_phase789_fixture(temp.path());
+        let facade = Repoctl::with_default_adapters().expect("facade");
+        let report = facade
+            .iac()
+            .plan(IacFacadeRequest {
+                repo: Some(temp.path().to_path_buf()),
+                affected: false,
+                project: Some(ProjectName::new("apps.catalog").expect("project")),
+                env: Some("dev".to_string()),
+                core: false,
+                base: None,
+                head: None,
+                changed_files: Vec::new(),
+                dry_run: true,
+            })
+            .expect("iac plan");
+        assert_eq!(report.commands[0].program, "pulumi");
+        assert_eq!(report.commands[0].cwd.as_str(), "apps/catalog/iac");
+    }
+
+    #[test]
+    fn test_should_list_render_templates_and_check_codegen_through_facade() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_phase789_fixture(temp.path());
+        let facade = Repoctl::with_default_adapters().expect("facade");
+        let templates = facade
+            .template_list(TemplateListRequest {
+                repo: Some(temp.path().to_path_buf()),
+            })
+            .expect("template list");
+        assert!(
+            templates
+                .templates
+                .iter()
+                .any(|template| template.source == "builtin:app")
+        );
+        let plan = facade
+            .template_render(TemplateRenderRequest {
+                repo: Some(temp.path().to_path_buf()),
+                source: TemplateSource::Builtin {
+                    name: "app".to_string(),
+                },
+                inputs: serde_json::json!({ "name": "catalog-template" }),
+                dry_run: true,
+            })
+            .expect("template render");
+        assert_eq!(
+            plan.operations[0].path.as_str(),
+            "catalog-template/README.md"
+        );
+        let codegen = facade
+            .codegen_check(CodegenCheckRequest {
+                repo: Some(temp.path().to_path_buf()),
+                base: None,
+                head: None,
+                changed_files: vec![
+                    RepoRelativePath::new("apps/catalog/api/generated/client.rs").expect("path"),
+                ],
+            })
+            .expect("codegen check");
+        assert!(
+            codegen
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_ref() == "policy.generated_code_readonly")
         );
     }
 
@@ -315,5 +493,95 @@ owners:
             )
             .expect("other manifest");
         }
+    }
+
+    fn write_phase789_fixture(root: &Path) {
+        fs::write(
+            root.join("repo.yaml"),
+            r#"
+schema: company.repo/v1
+name: acme
+layout: functional
+defaults:
+  owner: "@platform"
+protos:
+  root: protos
+  generated_code_policy: consumer-local
+policies:
+  prod_change:
+    required_owners:
+      - "@platform"
+      - "@security"
+"#,
+        )
+        .expect("repo manifest");
+        fs::create_dir_all(root.join("protos")).expect("protos dir");
+        fs::write(
+            root.join("protos/project.yaml"),
+            r#"
+schema: company.project/v1
+name: protos.shared
+kind: proto-root
+path: protos
+owners:
+  - "@platform"
+"#,
+        )
+        .expect("proto project");
+        fs::create_dir_all(root.join("apps/catalog/iac/stacks")).expect("catalog dir");
+        fs::write(
+            root.join("apps/catalog/project.yaml"),
+            r#"
+schema: company.project/v1
+name: apps.catalog
+kind: app
+path: apps/catalog
+owners:
+  - "@catalog"
+workspaces:
+  - name: api
+    language: rust
+    root: api
+    manifest: api/Cargo.toml
+tasks:
+  check:
+    - workspace: api
+      command: cargo check
+protos:
+  consumes:
+    - protos/acme/identity/v1/**
+iac:
+  root: iac
+  provider: pulumi
+  stacks:
+    - dev
+    - prod
+ai:
+  editable:
+    - api/**
+    - iac/**
+  do_not_edit:
+    - "**/generated/**"
+  docs:
+    - README.md
+"#,
+        )
+        .expect("catalog manifest");
+        fs::create_dir_all(root.join("foundations/identity")).expect("identity dir");
+        fs::write(
+            root.join("foundations/identity/project.yaml"),
+            r#"
+schema: company.project/v1
+name: foundations.identity
+kind: foundation-service
+path: foundations/identity
+owners:
+  - "@identity"
+protos:
+  owns:
+    - protos/acme/identity/v1/**
+"#,
+        )
+        .expect("identity manifest");
     }
 }

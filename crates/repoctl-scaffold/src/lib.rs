@@ -19,7 +19,8 @@ use repoctl_core::{
     Diagnostic, FileOperation, IacProvider, InitPlan, InitRequest, NewProjectRequest, OwnerHandle,
     ProjectKind, RenderPlan, RenderRequest, RenderedTemplate, RepoRelativePath, RepoRoot,
     RepoctlError, ResolvedTemplateSource, SkillsFacadeReport, SkillsFacadeRequest, TemplateEngine,
-    TemplateSource, TemplateSourceResolver, YamlManifestParser, utf8_path_buf,
+    TemplateListReport, TemplateListRequest, TemplateRenderRequest, TemplateSource,
+    TemplateSourceResolver, TemplateSummary, YamlManifestParser, utf8_path_buf,
 };
 use serde_json::json;
 
@@ -140,6 +141,124 @@ impl ScaffoldService {
                 )));
             }
         };
+        let diagnostics = apply_operations(&root, &operations, request.dry_run)?;
+        Ok(RenderPlan {
+            operations,
+            diagnostics,
+        })
+    }
+
+    /// Lists built-in and repository-local templates.
+    pub fn list_templates(
+        &self,
+        request: &TemplateListRequest,
+    ) -> Result<TemplateListReport, RepoctlError> {
+        let root = locate_or_current(request.repo.as_deref())?;
+        let repo_root = RepoRoot {
+            absolute: root.clone(),
+        };
+        let source_resolver = DefaultTemplateSourceResolver::default();
+        let mut templates = Vec::new();
+        for name in builtin_template_names() {
+            let template_data = source_resolver.resolve(
+                &repo_root,
+                &TemplateSource::Builtin {
+                    name: name.to_string(),
+                },
+            )?;
+            templates.push(TemplateSummary {
+                source: format!("builtin:{name}"),
+                name: template_data.manifest.name,
+                kind: template_data.manifest.kind,
+            });
+        }
+        let local_root = root.join("templates");
+        if local_root.is_dir() {
+            for entry in fs::read_dir(local_root.as_std_path())
+                .map_err(|source| RepoctlError::io(local_root.clone(), source))?
+            {
+                let entry = entry.map_err(|source| RepoctlError::io(local_root.clone(), source))?;
+                if !entry
+                    .file_type()
+                    .map_err(|source| RepoctlError::io(local_root.clone(), source))?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                let source_root = RepoRelativePath::new(format!("templates/{name}"))
+                    .map_err(RepoctlError::diagnostic)?;
+                let template_data = source_resolver.resolve(
+                    &repo_root,
+                    &TemplateSource::Local {
+                        root: source_root.clone(),
+                    },
+                );
+                if let Ok(template_data) = template_data {
+                    templates.push(TemplateSummary {
+                        source: format!("local:{source_root}"),
+                        name: template_data.manifest.name,
+                        kind: template_data.manifest.kind,
+                    });
+                }
+            }
+        }
+        templates.sort_by(|left, right| left.source.cmp(&right.source));
+        Ok(TemplateListReport {
+            templates,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// Renders a built-in or local template into a plan-first file operation set.
+    pub fn render_template(
+        &self,
+        request: &TemplateRenderRequest,
+    ) -> Result<RenderPlan, RepoctlError> {
+        let root = locate_or_current(request.repo.as_deref())?;
+        let repo_root = RepoRoot {
+            absolute: root.clone(),
+        };
+        let source_resolver = DefaultTemplateSourceResolver::default();
+        let engine = MiniJinjaTemplateEngine;
+        let template_data = source_resolver.resolve(&repo_root, &request.source)?;
+        let mut operations = Vec::new();
+        for file in &template_data.manifest.files {
+            if !should_render(file.when.as_deref(), &request.inputs, &engine)? {
+                continue;
+            }
+            let target = engine.render(&RenderRequest {
+                template: template_data.manifest.clone(),
+                file: file.clone(),
+                context: request.inputs.clone(),
+            })?;
+            let target = String::from_utf8(target.bytes).map_err(|source| {
+                RepoctlError::diagnostic(Diagnostic::error(
+                    "template.target.invalid_utf8",
+                    format!("template target did not render as UTF-8: {source}"),
+                ))
+            })?;
+            let path = RepoRelativePath::new(target).map_err(RepoctlError::diagnostic)?;
+            let source = template_source_content(&root, &request.source, &template_data, file)?;
+            let existing = {
+                let absolute = root.join(path.as_str());
+                if absolute.is_file() {
+                    Some(
+                        fs::read_to_string(absolute.as_std_path())
+                            .map_err(|source| RepoctlError::io(absolute, source))?,
+                    )
+                } else {
+                    None
+                }
+            };
+            let content =
+                engine.render_content(file, &source, existing.as_deref(), &request.inputs)?;
+            operations.push(FileOperation {
+                path,
+                operation: file.mode.clone(),
+                content: Some(content),
+            });
+        }
         let diagnostics = apply_operations(&root, &operations, request.dry_run)?;
         Ok(RenderPlan {
             operations,
@@ -918,7 +1037,17 @@ fn docs_index() -> String {
     format!("{MANAGED_HEADER}\n# Documentation\n\n- Repository initialized by repoctl.\n")
 }
 
+fn builtin_template_names() -> [&'static str; 5] {
+    ["repo", "app", "framework", "foundation", "skills"]
+}
+
 fn builtin_template_manifest(name: &str) -> Result<String, RepoctlError> {
+    if !builtin_template_names().contains(&name) {
+        return Err(RepoctlError::diagnostic(Diagnostic::error(
+            "template.builtin.unknown",
+            format!("unknown built-in template `{name}`"),
+        )));
+    }
     if !name
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -947,6 +1076,57 @@ post_render:
     - repoctl graph validate
 "#
     ))
+}
+
+fn builtin_template_file_content(name: &str, source: &str) -> Result<String, RepoctlError> {
+    match source {
+        "README.md.j2" => Ok(format!(
+            "{MANAGED_HEADER}\n# {{{{ name }}}}\n\nGenerated from builtin template `{name}`.\n"
+        )),
+        "AGENTS.md.j2" => Ok("Use repoctl-managed boundaries for {{ name }}.\n".to_string()),
+        _ => Err(RepoctlError::diagnostic(
+            Diagnostic::error(
+                "template.builtin.source_missing",
+                format!("built-in template `{name}` has no source `{source}`"),
+            )
+            .with_path(source),
+        )),
+    }
+}
+
+fn template_source_content(
+    root: &Utf8PathBuf,
+    source: &TemplateSource,
+    resolved: &ResolvedTemplateSource,
+    file: &repoctl_core::TemplateFile,
+) -> Result<String, RepoctlError> {
+    match source {
+        TemplateSource::Builtin { name } => {
+            builtin_template_file_content(name, file.source.as_str())
+        }
+        TemplateSource::Local { .. } => {
+            let source_path = resolved
+                .root
+                .join_project(&file.source)
+                .map_err(RepoctlError::diagnostic)?;
+            let absolute = root.join(source_path.as_str());
+            fs::read_to_string(absolute.as_std_path())
+                .map_err(|source| RepoctlError::io(absolute, source))
+        }
+    }
+}
+
+fn should_render(
+    expression: Option<&str>,
+    context: &serde_json::Value,
+    engine: &MiniJinjaTemplateEngine,
+) -> Result<bool, RepoctlError> {
+    let Some(expression) = expression else {
+        return Ok(true);
+    };
+    let template = format!("{{% if {expression} %}}true{{% else %}}false{{% endif %}}");
+    let rendered = engine.render_str("when", &template, context)?;
+    Ok(rendered == "true")
 }
 
 fn render_block(content: &str) -> String {

@@ -9,18 +9,22 @@
 use std::{
     fmt::Write as FmtWrite,
     io::{self, Write},
+    num::NonZeroU32,
     path::PathBuf,
     process::ExitCode,
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
 use repoctl::{
-    AffectedReport, AffectedRequest, BoundaryLintRequest, CiMatrixReport, CiMatrixRequest,
-    Diagnostic, ExplainReport, ExplainRequest, GraphPrintReport, GraphPrintRequest,
-    GraphValidateRequest, IacProvider, InitPlan, InitProfile, InitRequest, NewProjectRequest,
-    OwnerHandle, ProjectKind, ProjectName, ProtoPackageName, RenderPlan, RepoLayout, RepoName,
-    RepoRelativePath, Repoctl, RepoctlError, Severity, SkillsFacadeRequest, TaskName,
-    TaskRunReport, TaskRunRequest, ValidationReport,
+    AffectedReport, AffectedRequest, AiContext, AiContextRequest, BoundaryLintRequest,
+    CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic,
+    ExplainReport, ExplainRequest, GraphPrintReport, GraphPrintRequest, GraphValidateRequest,
+    IacFacadeReport, IacFacadeRequest, IacProvider, InitPlan, InitProfile, InitRequest,
+    NewProjectRequest, OwnerHandle, PrSummary, PrSummaryRequest, ProjectKind, ProjectName,
+    ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation, ProtoPackageName, RenderPlan,
+    RepoLayout, RepoName, RepoRelativePath, Repoctl, RepoctlError, Severity, SkillsFacadeRequest,
+    TaskName, TaskRunReport, TaskRunRequest, TemplateListReport, TemplateListRequest,
+    TemplateRenderRequest, TemplateSource, ValidationReport, WorkspaceName,
 };
 
 #[derive(Debug, Parser)]
@@ -117,6 +121,9 @@ enum Command {
         /// Project selector.
         #[arg(long = "project")]
         projects: Vec<String>,
+        /// Workspace selector in project:workspace form.
+        #[arg(long = "workspace")]
+        workspaces: Vec<String>,
         /// Run only affected projects.
         #[arg(long)]
         affected: bool,
@@ -132,6 +139,9 @@ enum Command {
         /// Plan without running commands.
         #[arg(long)]
         dry_run: bool,
+        /// Maximum task concurrency.
+        #[arg(long)]
+        concurrency: Option<NonZeroU32>,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
@@ -140,6 +150,45 @@ enum Command {
     Ci {
         #[command(subcommand)]
         command: CiCommand,
+    },
+    /// Template helpers.
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
+    /// Generated-code helpers.
+    Codegen {
+        #[command(subcommand)]
+        command: CodegenCommand,
+    },
+    /// Proto ownership and compatibility helpers.
+    Proto {
+        #[command(subcommand)]
+        command: ProtoCommand,
+    },
+    /// Build AI agent context.
+    Context {
+        /// Project id.
+        project: String,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Context audience.
+        #[arg(long = "for", default_value = "ai")]
+        for_target: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
+    },
+    /// Pull request helpers.
+    Pr {
+        #[command(subcommand)]
+        command: PrCommand,
+    },
+    /// `IaC` helpers.
+    Iac {
+        #[command(subcommand)]
+        command: IacCommand,
     },
     /// Skills helpers.
     Skills {
@@ -225,6 +274,158 @@ enum CiCommand {
         /// Repository root or path inside the repo.
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TemplateCommand {
+    /// List available templates.
+    List {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Render a template source.
+    Render {
+        /// Template source, for example builtin:app or local:templates/app.
+        source: String,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Input as key=value. Repeat as needed.
+        #[arg(long = "input")]
+        inputs: Vec<String>,
+        /// Plan without writing files.
+        #[arg(long)]
+        dry_run: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CodegenCommand {
+    /// Check generated-code direct edits.
+    Check {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Explicit changed file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Base git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref.
+        #[arg(long)]
+        head: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProtoCommand {
+    /// Find owner projects for a proto path.
+    Owners {
+        /// Proto source path or package name.
+        selector: String,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Find consumer projects for a proto path or package.
+    Consumers {
+        /// Proto source path or package name.
+        selector: String,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Check proto toolchain and generated-code policy.
+    Check {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Explicit changed file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Base git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref.
+        #[arg(long)]
+        head: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PrCommand {
+    /// Build a PR summary.
+    Summary {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Explicit changed file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Base git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref.
+        #[arg(long)]
+        head: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IacCommand {
+    /// Plan provider commands.
+    Plan {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Plan affected projects only.
+        #[arg(long)]
+        affected: bool,
+        /// Project selector.
+        #[arg(long)]
+        project: Option<String>,
+        /// Environment or stack.
+        #[arg(long)]
+        env: Option<String>,
+        /// Plan core infrastructure.
+        #[arg(long)]
+        core: bool,
+        /// Explicit changed file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Base git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref.
+        #[arg(long)]
+        head: Option<String>,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
@@ -431,22 +632,25 @@ fn run() -> Result<ExitCode, RepoctlError> {
             task,
             repo,
             projects,
+            workspaces,
             affected,
             changed_files,
             base,
             head,
             dry_run,
+            concurrency,
             format,
         } => {
             let report = repoctl.run_task(TaskRunRequest {
                 repo,
                 tasks: vec![TaskName::new(task).map_err(RepoctlError::diagnostic)?],
                 projects: parse_projects(projects)?,
+                workspaces: parse_workspaces(workspaces)?,
                 affected,
                 changed_files: parse_changed_files(changed_files)?,
                 base,
                 head,
-                concurrency: None,
+                concurrency,
                 dry_run,
             })?;
             render_task_report(&report, format)?;
@@ -481,6 +685,161 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 })?;
                 render_ci_matrix(&report, format)?;
                 Ok(ExitCode::SUCCESS)
+            }
+        },
+        Command::Template { command } => match command {
+            TemplateCommand::List { repo, format } => {
+                let report = repoctl.template_list(TemplateListRequest { repo })?;
+                render_template_list(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            TemplateCommand::Render {
+                source,
+                repo,
+                inputs,
+                dry_run,
+                format,
+            } => {
+                let plan = repoctl.template_render(TemplateRenderRequest {
+                    repo,
+                    source: parse_template_source(&source)?,
+                    inputs: parse_template_inputs(inputs)?,
+                    dry_run,
+                })?;
+                render_render_plan(&plan, format)?;
+                Ok(exit_for_diagnostics(&plan.diagnostics))
+            }
+        },
+        Command::Codegen { command } => match command {
+            CodegenCommand::Check {
+                repo,
+                changed_files,
+                base,
+                head,
+                format,
+            } => {
+                let report = repoctl.codegen_check(CodegenCheckRequest {
+                    repo,
+                    base,
+                    head,
+                    changed_files: parse_changed_files(changed_files)?,
+                })?;
+                render_codegen_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+        },
+        Command::Proto { command } => match command {
+            ProtoCommand::Owners {
+                selector,
+                repo,
+                format,
+            } => {
+                let report = repoctl.proto().owners(ProtoFacadeRequest {
+                    repo,
+                    operation: ProtoOperation::Owners,
+                    selector: Some(selector),
+                    base: None,
+                    head: None,
+                    changed_files: Vec::new(),
+                })?;
+                render_proto_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            ProtoCommand::Consumers {
+                selector,
+                repo,
+                format,
+            } => {
+                let report = repoctl.proto().consumers(ProtoFacadeRequest {
+                    repo,
+                    operation: ProtoOperation::Consumers,
+                    selector: Some(selector),
+                    base: None,
+                    head: None,
+                    changed_files: Vec::new(),
+                })?;
+                render_proto_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            ProtoCommand::Check {
+                repo,
+                changed_files,
+                base,
+                head,
+                format,
+            } => {
+                let report = repoctl.proto().check(ProtoFacadeRequest {
+                    repo,
+                    operation: ProtoOperation::Check,
+                    selector: None,
+                    base,
+                    head,
+                    changed_files: parse_changed_files(changed_files)?,
+                })?;
+                render_proto_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+        },
+        Command::Context {
+            project,
+            repo,
+            for_target,
+            format,
+        } => {
+            let report = repoctl.ai_context(AiContextRequest {
+                repo,
+                project: ProjectName::new(project).map_err(RepoctlError::diagnostic)?,
+                audience: for_target,
+            })?;
+            render_ai_context(&report, format)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Pr { command } => match command {
+            PrCommand::Summary {
+                repo,
+                changed_files,
+                base,
+                head,
+                format,
+            } => {
+                let report = repoctl.pr_summary(PrSummaryRequest {
+                    repo,
+                    base,
+                    head,
+                    changed_files: parse_changed_files(changed_files)?,
+                })?;
+                render_pr_summary(&report, format)?;
+                Ok(ExitCode::SUCCESS)
+            }
+        },
+        Command::Iac { command } => match command {
+            IacCommand::Plan {
+                repo,
+                affected,
+                project,
+                env,
+                core,
+                changed_files,
+                base,
+                head,
+                format,
+            } => {
+                let report = repoctl.iac().plan(IacFacadeRequest {
+                    repo,
+                    affected,
+                    project: project
+                        .map(ProjectName::new)
+                        .transpose()
+                        .map_err(RepoctlError::diagnostic)?,
+                    env,
+                    core,
+                    base,
+                    head,
+                    changed_files: parse_changed_files(changed_files)?,
+                    dry_run: true,
+                })?;
+                render_iac_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
             }
         },
         Command::Skills { command } => match command {
@@ -566,6 +925,81 @@ fn parse_projects(values: Vec<String>) -> Result<Vec<ProjectName>, RepoctlError>
         .into_iter()
         .map(|value| ProjectName::new(value).map_err(RepoctlError::diagnostic))
         .collect()
+}
+
+fn parse_workspaces(values: Vec<String>) -> Result<Vec<String>, RepoctlError> {
+    for value in &values {
+        let Some((project, workspace)) = value.split_once(':') else {
+            return Err(RepoctlError::diagnostic(
+                Diagnostic::error(
+                    "task.workspace.invalid",
+                    "workspace selectors must use project:workspace syntax",
+                )
+                .with_help("example: --workspace apps.catalog:api"),
+            ));
+        };
+        ProjectName::new(project.to_string()).map_err(RepoctlError::diagnostic)?;
+        WorkspaceName::new(workspace.to_string()).map_err(RepoctlError::diagnostic)?;
+    }
+    Ok(values)
+}
+
+fn parse_template_source(value: &str) -> Result<TemplateSource, RepoctlError> {
+    if let Some(name) = value.strip_prefix("builtin:") {
+        return Ok(TemplateSource::Builtin {
+            name: name.to_string(),
+        });
+    }
+    if let Some(root) = value.strip_prefix("local:") {
+        return Ok(TemplateSource::Local {
+            root: RepoRelativePath::new(root.to_string()).map_err(RepoctlError::diagnostic)?,
+        });
+    }
+    Err(RepoctlError::diagnostic(
+        Diagnostic::error(
+            "template.source.invalid",
+            "template source must use builtin:<name> or local:<repo-relative-path>",
+        )
+        .with_help("example: repoctl template render builtin:app --input name=catalog"),
+    ))
+}
+
+fn parse_template_inputs(values: Vec<String>) -> Result<serde_json::Value, RepoctlError> {
+    let mut map = serde_json::Map::new();
+    for value in values {
+        let Some((key, raw_value)) = value.split_once('=') else {
+            return Err(RepoctlError::diagnostic(
+                Diagnostic::error(
+                    "template.input.invalid",
+                    "template input must use key=value syntax",
+                )
+                .with_help("example: --input name=catalog"),
+            ));
+        };
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "template.input.invalid_key",
+                "template input keys may only contain ASCII letters, numbers, and underscore",
+            )));
+        }
+        map.insert(key.to_string(), parse_template_input_value(raw_value));
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+fn parse_template_input_value(value: &str) -> serde_json::Value {
+    match value {
+        "true" => serde_json::Value::Bool(true),
+        "false" => serde_json::Value::Bool(false),
+        _ => value.parse::<i64>().map_or_else(
+            |_| serde_json::Value::String(value.to_string()),
+            |number| serde_json::Value::Number(number.into()),
+        ),
+    }
 }
 
 fn render_init_plan(plan: &InitPlan, format: OutputFormat) -> Result<(), RepoctlError> {
@@ -725,6 +1159,115 @@ fn render_ci_matrix(report: &CiMatrixReport, format: OutputFormat) -> Result<(),
             for entry in &report.entries {
                 let _ = writeln!(&mut output, "{entry}");
             }
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_template_list(
+    report: &TemplateListReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            for template in &report.templates {
+                let _ = writeln!(
+                    &mut output,
+                    "{}\t{}\t{}",
+                    template.source, template.kind, template.name
+                );
+            }
+            render_optional_diagnostics(&mut output, &report.diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_codegen_report(
+    report: &CodegenCheckReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    let validation = ValidationReport::new(report.diagnostics.clone());
+    render_validation_report(&validation, format)
+}
+
+fn render_proto_report(
+    report: &ProtoFacadeReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            if !report.owners.is_empty() {
+                output.push_str("Owners:\n");
+                for owner in &report.owners {
+                    let _ = writeln!(&mut output, "  {owner}");
+                }
+            }
+            if !report.consumers.is_empty() {
+                output.push_str("Consumers:\n");
+                for consumer in &report.consumers {
+                    let _ = writeln!(&mut output, "  {consumer}");
+                }
+            }
+            if !report.commands.is_empty() {
+                output.push_str("Commands:\n");
+                for command in &report.commands {
+                    let _ = writeln!(
+                        &mut output,
+                        "  (cd {} && {} {})",
+                        command.cwd,
+                        command.program,
+                        command.args.join(" ")
+                    );
+                }
+            }
+            render_optional_diagnostics(&mut output, &report.diagnostics);
+            if output.is_empty() {
+                output.push_str("OK\n");
+            }
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_ai_context(report: &AiContext, format: OutputFormat) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => write_json(&report.payload),
+    }
+}
+
+fn render_pr_summary(report: &PrSummary, format: OutputFormat) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => write_stdout(&report.markdown),
+    }
+}
+
+fn render_iac_report(report: &IacFacadeReport, format: OutputFormat) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            output.push_str("Commands:\n");
+            for command in &report.commands {
+                let _ = writeln!(
+                    &mut output,
+                    "  (cd {} && {} {})",
+                    command.cwd,
+                    command.program,
+                    command.args.join(" ")
+                );
+            }
+            output.push_str("Risk flags:\n");
+            for risk in &report.risk_flags {
+                let _ = writeln!(&mut output, "  {risk}");
+            }
+            render_optional_diagnostics(&mut output, &report.diagnostics);
             write_stdout(&output)
         }
     }

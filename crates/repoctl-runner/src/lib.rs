@@ -10,15 +10,20 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     process::Command,
     sync::Arc,
 };
 
+use globset::Glob;
 use repoctl_core::{
-    AffectedReason, AffectedReport, AffectedRequest, CiMatrixReport, CiMatrixRequest, Diagnostic,
-    EdgeKind, ProcessCommand, ProcessOutput, ProcessRunner, ProjectManifest, ProjectName,
-    RepoRelativePath, RepoSnapshot, RepoctlError, TaskCommandOutput, TaskName, TaskRunPlan,
-    TaskRunReport, TaskRunRequest, ToolchainAdapter, ToolchainEnvironmentInput, WorkspaceLanguage,
+    AffectedReason, AffectedReport, AffectedRequest, AiContext, AiContextRequest, CiMatrixReport,
+    CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic, EdgeKind,
+    IacFacadeReport, IacFacadeRequest, IacProvider, PrSummary, PrSummaryRequest, ProcessCommand,
+    ProcessOutput, ProcessRunner, ProjectManifest, ProjectName, ProtoFacadeReport,
+    ProtoFacadeRequest, ProtoOperation, RepoRelativePath, RepoSnapshot, RepoctlError,
+    TaskCommandOutput, TaskName, TaskRunPlan, TaskRunReport, TaskRunRequest, ToolchainAdapter,
+    ToolchainEnvironmentInput, WorkspaceLanguage,
 };
 use repoctl_engine::RepoctlEngine;
 use serde_json::json;
@@ -322,6 +327,7 @@ impl RunnerService {
             repo: request.repo.clone(),
             tasks: request.tasks.clone(),
             projects: Vec::new(),
+            workspaces: Vec::new(),
             affected: true,
             changed_files: request.changed_files.clone(),
             base: request.base.clone(),
@@ -361,6 +367,156 @@ impl RunnerService {
         })
     }
 
+    /// Handles proto owner, consumer, and check requests.
+    pub fn proto(&self, request: &ProtoFacadeRequest) -> Result<ProtoFacadeReport, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        match request.operation {
+            ProtoOperation::Owners => {
+                let selector = required_selector(request)?;
+                Ok(ProtoFacadeReport {
+                    owners: proto_projects(&snapshot, selector, ProtoMatchKind::Owner)?,
+                    consumers: Vec::new(),
+                    commands: Vec::new(),
+                    diagnostics: Vec::new(),
+                })
+            }
+            ProtoOperation::Consumers => {
+                let selector = required_selector(request)?;
+                Ok(ProtoFacadeReport {
+                    owners: Vec::new(),
+                    consumers: proto_projects(&snapshot, selector, ProtoMatchKind::Consumer)?,
+                    commands: Vec::new(),
+                    diagnostics: Vec::new(),
+                })
+            }
+            ProtoOperation::Check => {
+                let changed_files = self.changed_files(
+                    request.repo.as_deref(),
+                    request.base.as_deref(),
+                    request.head.as_deref(),
+                    &request.changed_files,
+                )?;
+                let diagnostics = self.engine.policies().evaluate(&snapshot, &changed_files)?;
+                let commands = proto_check_commands(&snapshot);
+                Ok(ProtoFacadeReport {
+                    owners: Vec::new(),
+                    consumers: Vec::new(),
+                    commands,
+                    diagnostics,
+                })
+            }
+        }
+    }
+
+    /// Checks generated-code direct edits.
+    pub fn codegen_check(
+        &self,
+        request: &CodegenCheckRequest,
+    ) -> Result<CodegenCheckReport, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        let changed_files = self.changed_files(
+            request.repo.as_deref(),
+            request.base.as_deref(),
+            request.head.as_deref(),
+            &request.changed_files,
+        )?;
+        let diagnostics = self
+            .engine
+            .policies()
+            .evaluate(&snapshot, &changed_files)?
+            .into_iter()
+            .filter(|diagnostic| diagnostic.code.as_ref() == "policy.generated_code_readonly")
+            .collect();
+        Ok(CodegenCheckReport { diagnostics })
+    }
+
+    /// Builds AI context for one project.
+    pub fn ai_context(&self, request: &AiContextRequest) -> Result<AiContext, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|project| project.name == request.project)
+            .ok_or_else(|| {
+                RepoctlError::diagnostic(
+                    Diagnostic::error(
+                        "context.project.not_found",
+                        format!("project `{}` was not found", request.project),
+                    )
+                    .with_project(request.project.as_str()),
+                )
+            })?;
+        Ok(AiContext {
+            payload: project_ai_context(&snapshot, project, &request.audience),
+        })
+    }
+
+    /// Builds a Markdown and JSON PR impact summary.
+    pub fn pr_summary(&self, request: &PrSummaryRequest) -> Result<PrSummary, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        let changed_files = self.changed_files(
+            request.repo.as_deref(),
+            request.base.as_deref(),
+            request.head.as_deref(),
+            &request.changed_files,
+        )?;
+        let affected = compute_affected(&snapshot, &changed_files, &[]);
+        let diagnostics = self.engine.policies().evaluate(&snapshot, &changed_files)?;
+        Ok(render_pr_summary(
+            &snapshot,
+            &changed_files,
+            &affected,
+            &diagnostics,
+        ))
+    }
+
+    /// Plans `IaC` provider commands.
+    pub fn iac_plan(&self, request: &IacFacadeRequest) -> Result<IacFacadeReport, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        let changed_files = self.changed_files(
+            request.repo.as_deref(),
+            request.base.as_deref(),
+            request.head.as_deref(),
+            &request.changed_files,
+        )?;
+        let targets = iac_targets(&snapshot, request, &changed_files)?;
+        let commands = targets
+            .iter()
+            .map(|target| iac_plan_command(&snapshot, target))
+            .collect::<Result<Vec<_>, _>>()?;
+        let risk_flags = iac_risk_flags(&targets, &changed_files);
+        Ok(IacFacadeReport {
+            commands,
+            risk_flags,
+            diagnostics: Vec::new(),
+        })
+    }
+
     fn changed_files(
         &self,
         repo: Option<&std::path::Path>,
@@ -376,6 +532,399 @@ impl RunnerService {
             _ => Ok(Vec::new()),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtoMatchKind {
+    Owner,
+    Consumer,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IacTarget<'a> {
+    project: Option<&'a ProjectManifest>,
+    root: RepoRelativePath,
+    provider: IacProvider,
+    stack: String,
+    core: bool,
+}
+
+trait ProtoToolchainAdapter {
+    fn check_commands(&self, snapshot: &RepoSnapshot) -> Vec<ProcessCommand>;
+}
+
+#[derive(Clone, Debug, Default)]
+struct BufProtoToolchainAdapter;
+
+impl ProtoToolchainAdapter for BufProtoToolchainAdapter {
+    fn check_commands(&self, snapshot: &RepoSnapshot) -> Vec<ProcessCommand> {
+        let buf_yaml = snapshot
+            .root
+            .absolute
+            .join(snapshot.repo_manifest.protos_root.as_str())
+            .join("buf.yaml");
+        if !buf_yaml.is_file() {
+            return Vec::new();
+        }
+        vec![ProcessCommand {
+            cwd: snapshot.repo_manifest.protos_root.clone(),
+            absolute_cwd: Some(buf_yaml.parent().map_or_else(
+                || snapshot.root.absolute.as_std_path().to_path_buf(),
+                |path| path.as_std_path().to_path_buf(),
+            )),
+            program: "buf".to_string(),
+            args: vec!["lint".to_string()],
+            ..ProcessCommand::default()
+        }]
+    }
+}
+
+trait IacProviderAdapter {
+    fn plan_command(
+        &self,
+        snapshot: &RepoSnapshot,
+        target: &IacTarget<'_>,
+    ) -> Result<ProcessCommand, RepoctlError>;
+}
+
+#[derive(Clone, Debug, Default)]
+struct PulumiIacProviderAdapter;
+
+impl IacProviderAdapter for PulumiIacProviderAdapter {
+    fn plan_command(
+        &self,
+        snapshot: &RepoSnapshot,
+        target: &IacTarget<'_>,
+    ) -> Result<ProcessCommand, RepoctlError> {
+        Ok(iac_command(
+            snapshot,
+            target,
+            "pulumi",
+            vec![
+                "preview".to_string(),
+                "--stack".to_string(),
+                target.stack.clone(),
+            ],
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TerraformIacProviderAdapter;
+
+impl IacProviderAdapter for TerraformIacProviderAdapter {
+    fn plan_command(
+        &self,
+        snapshot: &RepoSnapshot,
+        target: &IacTarget<'_>,
+    ) -> Result<ProcessCommand, RepoctlError> {
+        Ok(iac_command(
+            snapshot,
+            target,
+            "terraform",
+            vec![
+                "plan".to_string(),
+                "-var".to_string(),
+                format!("env={}", target.stack),
+            ],
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct OpenTofuIacProviderAdapter;
+
+impl IacProviderAdapter for OpenTofuIacProviderAdapter {
+    fn plan_command(
+        &self,
+        snapshot: &RepoSnapshot,
+        target: &IacTarget<'_>,
+    ) -> Result<ProcessCommand, RepoctlError> {
+        Ok(iac_command(
+            snapshot,
+            target,
+            "tofu",
+            vec![
+                "plan".to_string(),
+                "-var".to_string(),
+                format!("env={}", target.stack),
+            ],
+        ))
+    }
+}
+
+fn required_selector(request: &ProtoFacadeRequest) -> Result<&str, RepoctlError> {
+    request.selector.as_deref().ok_or_else(|| {
+        RepoctlError::diagnostic(Diagnostic::error(
+            "proto.selector.required",
+            "proto owners and consumers require a path or package selector",
+        ))
+    })
+}
+
+fn proto_projects(
+    snapshot: &RepoSnapshot,
+    selector: &str,
+    kind: ProtoMatchKind,
+) -> Result<Vec<ProjectName>, RepoctlError> {
+    let normalized = normalize_proto_selector(selector)?;
+    let mut projects = snapshot
+        .projects
+        .iter()
+        .filter(|project| {
+            let patterns = match kind {
+                ProtoMatchKind::Owner => &project.protos.owns,
+                ProtoMatchKind::Consumer => &project.protos.consumes,
+            };
+            patterns
+                .iter()
+                .any(|pattern| glob_matches(pattern.as_str(), &normalized))
+        })
+        .map(|project| project.name.clone())
+        .collect::<Vec<_>>();
+    projects.sort();
+    projects.dedup();
+    Ok(projects)
+}
+
+fn normalize_proto_selector(selector: &str) -> Result<String, RepoctlError> {
+    if selector.starts_with("protos/") {
+        return Ok(selector.to_string());
+    }
+    if selector
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+    {
+        return Ok(format!("protos/{}", selector.replace('.', "/")));
+    }
+    Err(RepoctlError::diagnostic(Diagnostic::error(
+        "proto.selector.invalid",
+        "proto selector must be a protos/ path or proto package name",
+    )))
+}
+
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    Glob::new(pattern)
+        .map(|glob| glob.compile_matcher())
+        .is_ok_and(|matcher| matcher.is_match(path))
+}
+
+fn proto_check_commands(snapshot: &RepoSnapshot) -> Vec<ProcessCommand> {
+    BufProtoToolchainAdapter.check_commands(snapshot)
+}
+
+fn project_ai_context(
+    snapshot: &RepoSnapshot,
+    project: &ProjectManifest,
+    audience: &str,
+) -> serde_json::Value {
+    let dependencies = snapshot
+        .graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from == project.node_id())
+        .map(|edge| {
+            json!({
+                "to": edge.to,
+                "kind": format!("{:?}", edge.kind),
+                "evidence": edge.evidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    let commands = project
+        .tasks
+        .iter()
+        .map(|(task, commands)| {
+            json!({
+                "task": task,
+                "commands": commands,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "audience": audience,
+        "repo": snapshot.repo_manifest.name,
+        "project": project.name,
+        "kind": project.kind,
+        "owners": project.owners,
+        "path": project.path,
+        "workspaces": project.workspaces,
+        "editable": project.ai.editable,
+        "doNotEdit": project.ai.do_not_edit,
+        "docs": project.ai.docs,
+        "dependencies": dependencies,
+        "commands": commands,
+        "proto": {
+            "owns": project.protos.owns,
+            "consumes": project.protos.consumes,
+        },
+        "iac": project.iac,
+        "policies": snapshot.repo_manifest.policies,
+    })
+}
+
+fn render_pr_summary(
+    snapshot: &RepoSnapshot,
+    changed_files: &[RepoRelativePath],
+    affected: &AffectedReport,
+    diagnostics: &[Diagnostic],
+) -> PrSummary {
+    let mut markdown = String::new();
+    markdown.push_str("# PR Impact Summary\n\n");
+    markdown.push_str("## Changed Files\n");
+    for file in changed_files {
+        let _ = writeln!(markdown, "- `{file}`");
+    }
+    markdown.push_str("\n## Affected Projects\n");
+    for project in affected
+        .directly_affected
+        .iter()
+        .chain(affected.transitively_affected.iter())
+    {
+        let _ = writeln!(markdown, "- `{project}`");
+    }
+    markdown.push_str("\n## Affected Tasks\n");
+    for task in &affected.tasks {
+        let _ = writeln!(markdown, "- `{task}`");
+    }
+    markdown.push_str("\n## Risk Flags\n");
+    for risk in &affected.risk_flags {
+        let _ = writeln!(markdown, "- `{risk}`");
+    }
+    for diagnostic in diagnostics {
+        let _ = writeln!(markdown, "- `{}`: {}", diagnostic.code, diagnostic.message);
+    }
+    markdown.push_str("\n## Suggested Reviewers\n");
+    for reviewer in &affected.suggested_reviewers {
+        let _ = writeln!(markdown, "- `{reviewer}`");
+    }
+    markdown.push_str("\n## Suggested Commands\n");
+    markdown.push_str("- `repoctl graph validate`\n");
+    markdown.push_str("- `repoctl affected`\n");
+    let impact = json!({
+        "repo": snapshot.repo_manifest.name,
+        "changedFiles": changed_files,
+        "affected": affected,
+        "diagnostics": diagnostics,
+    });
+    PrSummary { markdown, impact }
+}
+
+fn iac_targets<'a>(
+    snapshot: &'a RepoSnapshot,
+    request: &IacFacadeRequest,
+    changed_files: &[RepoRelativePath],
+) -> Result<Vec<IacTarget<'a>>, RepoctlError> {
+    let mut targets = Vec::new();
+    if request.core {
+        targets.push(IacTarget {
+            project: None,
+            root: snapshot.repo_manifest.core_infra_root.clone(),
+            provider: IacProvider::Pulumi,
+            stack: request.env.clone().unwrap_or_else(|| "dev".to_string()),
+            core: true,
+        });
+        return Ok(targets);
+    }
+    for project in &snapshot.projects {
+        if let Some(selected) = &request.project
+            && selected != &project.name
+        {
+            continue;
+        }
+        if request.affected
+            && !changed_files
+                .iter()
+                .any(|changed_file| project.contains_path(changed_file))
+        {
+            continue;
+        }
+        let Some(iac) = &project.iac else {
+            continue;
+        };
+        let stacks = if let Some(env) = &request.env {
+            vec![env.clone()]
+        } else if iac.stacks.is_empty() {
+            vec!["default".to_string()]
+        } else {
+            iac.stacks.clone()
+        };
+        let iac_root = project
+            .path
+            .join_project(&iac.root)
+            .map_err(RepoctlError::diagnostic)?;
+        targets.extend(stacks.into_iter().map(|stack| IacTarget {
+            project: Some(project),
+            root: iac_root.clone(),
+            provider: iac.provider.clone(),
+            stack,
+            core: false,
+        }));
+    }
+    if targets.is_empty() && (request.project.is_some() || request.core) {
+        return Err(RepoctlError::diagnostic(Diagnostic::error(
+            "iac.target.not_found",
+            "no matching IaC target was found",
+        )));
+    }
+    Ok(targets)
+}
+
+fn iac_plan_command(
+    snapshot: &RepoSnapshot,
+    target: &IacTarget<'_>,
+) -> Result<ProcessCommand, RepoctlError> {
+    match target.provider {
+        IacProvider::Pulumi => PulumiIacProviderAdapter.plan_command(snapshot, target),
+        IacProvider::Terraform => TerraformIacProviderAdapter.plan_command(snapshot, target),
+        IacProvider::OpenTofu => OpenTofuIacProviderAdapter.plan_command(snapshot, target),
+    }
+}
+
+fn iac_command(
+    snapshot: &RepoSnapshot,
+    target: &IacTarget<'_>,
+    program: &str,
+    args: Vec<String>,
+) -> ProcessCommand {
+    ProcessCommand {
+        project: target.project.map(|project| project.name.clone()),
+        workspace: None,
+        task: None,
+        cwd: target.root.clone(),
+        absolute_cwd: Some(
+            snapshot
+                .root
+                .absolute
+                .join(target.root.as_str())
+                .as_std_path()
+                .to_path_buf(),
+        ),
+        program: program.to_string(),
+        args,
+        env: BTreeMap::new(),
+    }
+}
+
+fn iac_risk_flags(targets: &[IacTarget<'_>], changed_files: &[RepoRelativePath]) -> Vec<String> {
+    let mut flags = BTreeSet::new();
+    for target in targets {
+        if target.core {
+            flags.insert("core-infra".to_string());
+        }
+        if target.stack == "prod" {
+            flags.insert("prod-iac".to_string());
+        }
+    }
+    for file in changed_files {
+        if file.as_str().starts_with("core-infra/") {
+            flags.insert("core-infra".to_string());
+        }
+        if file.as_str().contains("/iac/stacks/prod") {
+            flags.insert("prod-iac".to_string());
+        }
+    }
+    flags.into_iter().collect()
 }
 
 fn compute_affected(
@@ -636,11 +1185,14 @@ fn plan_task_commands(
                 continue;
             }
             for task_command in task_commands {
-                if let Some(affected_workspaces) = &affected_workspaces {
-                    let workspace_id = format!("{}:{}", project.name, task_command.workspace);
-                    if !affected_workspaces.contains(&workspace_id) {
-                        continue;
-                    }
+                let workspace_id = format!("{}:{}", project.name, task_command.workspace);
+                if !request.workspaces.is_empty() && !request.workspaces.contains(&workspace_id) {
+                    continue;
+                }
+                if let Some(affected_workspaces) = &affected_workspaces
+                    && !affected_workspaces.contains(&workspace_id)
+                {
+                    continue;
                 }
                 let workspace = project
                     .workspaces
