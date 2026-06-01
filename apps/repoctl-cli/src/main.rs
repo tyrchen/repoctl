@@ -27,6 +27,10 @@ use repoctl::{
     TemplateRenderRequest, TemplateSource, ValidationReport, WorkspaceName,
 };
 
+mod interactive;
+
+use interactive::{InteractiveArgs, NewProjectPromptContext, normalize_new_project_path};
+
 #[derive(Debug, Parser)]
 #[command(name = "repoctl", version, about = "Monorepo control plane")]
 struct Cli {
@@ -209,8 +213,8 @@ enum NewCommand {
 
 #[derive(Clone, Debug, Parser)]
 struct NewProjectArgs {
-    /// Project path, for example apps/catalog.
-    path: String,
+    /// Project name or path. Names are placed under the selected project root.
+    path: Option<String>,
     /// Repository root or path inside the repo.
     #[arg(long)]
     repo: Option<PathBuf>,
@@ -545,10 +549,16 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 NewCommand::Foundation(args) => (ProjectKind::FoundationService, args),
             };
             let format = args.format;
+            let args = args.complete_interactively(NewProjectPromptContext {
+                kind: &kind,
+                format,
+            })?;
+            let path = normalize_new_project_path(&kind, args.path.as_deref())
+                .map_err(RepoctlError::diagnostic)?;
             let plan = repoctl.new_project(NewProjectRequest {
                 repo: args.repo,
                 kind,
-                path: RepoRelativePath::new(args.path).map_err(RepoctlError::diagnostic)?,
+                path,
                 stack: args.stack,
                 languages: args.languages,
                 clients: args.clients,
@@ -1387,5 +1397,50 @@ mod tests {
 
         assert_eq!(root, PathBuf::from("."));
         Ok(())
+    }
+
+    #[test]
+    fn test_should_place_bare_framework_name_under_frameworks_root() -> Result<(), Diagnostic> {
+        let path = interactive::normalize_new_project_path(&ProjectKind::Framework, Some("core"))?;
+
+        assert_eq!(path.as_str(), "frameworks/core");
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_keep_explicit_framework_path() -> Result<(), Diagnostic> {
+        let path = interactive::normalize_new_project_path(
+            &ProjectKind::Framework,
+            Some("frameworks/core"),
+        )?;
+
+        assert_eq!(path.as_str(), "frameworks/core");
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_framework_path_under_app_root() {
+        let error =
+            interactive::normalize_new_project_path(&ProjectKind::Framework, Some("apps/core"))
+                .expect_err("kind mismatch");
+
+        assert_eq!(error.code.as_ref(), "new.path.kind_mismatch");
+    }
+
+    #[test]
+    fn test_should_require_project_name_below_kind_root() {
+        let error =
+            interactive::normalize_new_project_path(&ProjectKind::Framework, Some("frameworks"))
+                .expect_err("missing slug");
+
+        assert_eq!(error.code.as_ref(), "new.path.missing_slug");
+    }
+
+    #[test]
+    fn test_should_reject_separator_only_project_path() {
+        let error = interactive::normalize_new_project_path(&ProjectKind::Framework, Some("/"))
+            .expect_err("missing path");
+
+        assert_eq!(error.code.as_ref(), "new.path.required");
     }
 }

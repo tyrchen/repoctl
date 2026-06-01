@@ -8,6 +8,7 @@ This note records the dependency and tooling checks used while deriving the v0.2
 
 - Rust latest stable is 1.96.0, released on 2026-05-28. Pinning this in `rust-toolchain.toml` satisfies the project rule to use Rust 2024 on latest stable. Source: <https://blog.rust-lang.org/2026/05/28/Rust-1.96.0/>.
 - `clap` latest docs show 4.6.1 and support the derive API used for structured subcommands. Source: <https://docs.rs/crate/clap/latest>.
+- `cliclack` latest docs show 0.5.4 and provide the prompt primitives needed for interactive CLI flows: text input, select, multi-select, confirm, and intro/outro rendering. Source: <https://docs.rs/cliclack/latest/cliclack/>.
 - `minijinja` latest docs show 2.20.0. It remains the right default for the PRD's MiniJinja template system because it is Rust-native and supports sandboxed rendering patterns. Source: <https://docs.rs/crate/minijinja/latest>.
 - `serde_yaml` is deprecated and no longer maintained. `serde_yml` has a RustSec advisory for unsoundness and unmaintained status. `serde_norway` is the practical maintained fork to evaluate for YAML manifest parsing, with latest docs showing 0.9.42. Sources: <https://docs.rs/crate/serde_yaml/latest>, <https://rustsec.org/advisories/RUSTSEC-2025-0068>, <https://docs.rs/serde_norway>.
 - `camino` latest docs show 1.2.2. It is a good fit for repo-relative UTF-8 path modeling and serde/clap integration. Source: <https://docs.rs/crate/camino/latest>.
