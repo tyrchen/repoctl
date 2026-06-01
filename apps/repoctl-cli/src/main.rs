@@ -10,7 +10,7 @@ use std::{
     fmt::Write as FmtWrite,
     io::{self, Write},
     num::NonZeroU32,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -47,9 +47,9 @@ enum Command {
         /// Repository layout.
         #[arg(long, value_enum, default_value_t = LayoutArg::Functional)]
         layout: LayoutArg,
-        /// Target repository root.
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
+        /// Explicit repository root. Defaults to a new directory named by --name.
+        #[arg(long)]
+        repo: Option<PathBuf>,
         /// Plan without writing files.
         #[arg(long)]
         dry_run: bool,
@@ -526,9 +526,11 @@ fn run() -> Result<ExitCode, RepoctlError> {
             dry_run,
             format,
         } => {
+            let name = RepoName::new(name).map_err(RepoctlError::diagnostic)?;
+            let repo_root = init_repo_root(repo.as_deref(), &name);
             let plan = repoctl.init(InitRequest {
-                repo_root: repo,
-                name: RepoName::new(name).map_err(RepoctlError::diagnostic)?,
+                repo_root,
+                name,
                 profile: profile.into(),
                 layout: layout.into(),
                 dry_run,
@@ -869,6 +871,10 @@ fn run() -> Result<ExitCode, RepoctlError> {
             }
         },
     }
+}
+
+fn init_repo_root(explicit_root: Option<&Path>, name: &RepoName) -> PathBuf {
+    explicit_root.map_or_else(|| PathBuf::from(name.as_str()), Path::to_path_buf)
 }
 
 impl From<InitProfileArg> for InitProfile {
@@ -1358,5 +1364,28 @@ fn exit_for_diagnostics(diagnostics: &[Diagnostic]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_initialize_named_repo_under_parent_directory() -> Result<(), Diagnostic> {
+        let name = RepoName::new("universe")?;
+        let root = init_repo_root(None, &name);
+
+        assert_eq!(root, PathBuf::from("universe"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_use_explicit_init_repo_root_when_provided() -> Result<(), Diagnostic> {
+        let name = RepoName::new("universe")?;
+        let root = init_repo_root(Some(Path::new(".")), &name);
+
+        assert_eq!(root, PathBuf::from("."));
+        Ok(())
     }
 }
