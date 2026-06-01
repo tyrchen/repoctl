@@ -713,7 +713,7 @@ v0.2 supports builtin and local templates. External Git templates are deferred u
 repo.yaml
 AGENTS.md
 .repoctl/
-.agent/skills/
+.agents/skills/
 .claude/skills/
 .github/
 protos/
@@ -780,7 +780,7 @@ AI context is generated from the same `RepoSnapshot` used by CI:
 - IaC boundaries
 - risk flags
 
-Skill sync maintains `.agent/skills` and `.claude/skills` from repo policy. Managed blocks allow repoctl to upgrade generated content while preserving user-authored sections.
+Skill sync maintains `.agents/skills` and `.claude/skills` from repo policy. Managed blocks allow repoctl to upgrade generated content while preserving user-authored sections.
 
 ## 19. CLI Surface
 
@@ -899,7 +899,7 @@ Initial dependency direction:
 | Dependency boundary rules | Sections 7, 11, 21 |
 | Hybrid core infra and app/foundation IaC | Sections 12, 17 |
 | `repoctl init` | Sections 14, 15 |
-| `.agent/skills` and `.claude/skills` | Sections 15, 18 |
+| `.agents/skills` and `.claude/skills` | Sections 15, 18 |
 | Template system and MiniJinja | Sections 7, 8, 14 |
 | CLI command surface | Sections 5, 19 |
 | CI design | Sections 5, 8, 12, 19 |

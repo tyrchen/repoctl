@@ -245,7 +245,7 @@ AI context 精准
 │   ├── templates/
 │   └── schemas/
 │
-├── .agent/
+├── .agents/
 │   └── skills/
 │       ├── repoctl/
 │       ├── monorepo-boundaries/
@@ -867,7 +867,7 @@ templates:
       - git
 
 ai:
-  agent_skills_root: .agent/skills
+  agent_skills_root: .agents/skills
   claude_skills_root: .claude/skills
   context_output: target/repoctl/context-packs
 
@@ -1361,7 +1361,7 @@ blast radius 可控
 ```text
 repo.yaml
 AGENTS.md
-.agent/skills
+.agents/skills
 .claude/skills
 .github workflows
 CODEOWNERS
@@ -1468,7 +1468,7 @@ templates:
 repo.yaml
 AGENTS.md
 .repoctl/
-.agent/skills/
+.agents/skills/
 .claude/skills/
 .github/CODEOWNERS
 .github/pull_request_template.md
@@ -1511,7 +1511,7 @@ Initialized acme monorepo.
 Created:
   repo.yaml
   AGENTS.md
-  .agent/skills/
+  .agents/skills/
   .claude/skills/
   .github/workflows/
   protos/
@@ -1536,7 +1536,7 @@ Next steps:
 
 ---
 
-# 12. .agent/skills 和 .claude/skills
+# 12. .agents/skills 和 .claude/skills
 
 ## 12.1 目标
 
@@ -1547,7 +1547,7 @@ AI agent 不应该只读 `AGENTS.md`。
 `repoctl init` 默认生成：
 
 ```text
-.agent/skills/
+.agents/skills/
 .claude/skills/
 ```
 
@@ -1556,7 +1556,7 @@ AI agent 不应该只读 `AGENTS.md`。
 原因：
 
 ```text
-.agent/skills 面向通用 agent runtime
+.agents/skills 面向通用 agent runtime
 .claude/skills 面向 Claude Code / Claude agent 工作流
 ```
 
@@ -1565,11 +1565,11 @@ AI agent 不应该只读 `AGENTS.md`。
 ## 12.2 生成的 skills
 
 ```text
-.agent/skills/repoctl/SKILL.md
-.agent/skills/monorepo-boundaries/SKILL.md
-.agent/skills/proto-change/SKILL.md
-.agent/skills/pr-review/SKILL.md
-.agent/skills/app-creation/SKILL.md
+.agents/skills/repoctl/SKILL.md
+.agents/skills/monorepo-boundaries/SKILL.md
+.agents/skills/proto-change/SKILL.md
+.agents/skills/pr-review/SKILL.md
+.agents/skills/app-creation/SKILL.md
 
 .claude/skills/repoctl/SKILL.md
 .claude/skills/monorepo-boundaries/SKILL.md
@@ -1700,7 +1700,7 @@ repoctl skills sync
 从 repo.yaml 重新生成 skills
 保留用户自定义 block
 升级 repoctl-managed block
-同步 .agent 和 .claude
+同步 .agents 和 .claude
 ```
 
 ---
@@ -2137,7 +2137,7 @@ suggested reviewers
 repo.yaml:
   affects repo-wide validation
 
-.agent/skills/**:
+.agents/skills/**:
   affects AI workflow validation
 
 .claude/skills/**:
@@ -2688,7 +2688,7 @@ pub struct MiniJinjaEngine {
 负责：
 
 ```text
-生成 .agent/skills
+生成 .agents/skills
 生成 .claude/skills
 同步 managed blocks
 验证 skills 是否过期
@@ -2867,7 +2867,7 @@ repoctl init
 functional layout
 repo.yaml
 AGENTS.md
-.agent/skills
+.agents/skills
 .claude/skills
 protos root
 apps/foundations/frameworks/core-infra roots

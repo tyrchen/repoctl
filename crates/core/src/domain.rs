@@ -1441,7 +1441,7 @@ pub struct CodegenCheckReport {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Proto facade request placeholder.
+/// Proto facade request.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtoFacadeRequest {
@@ -1487,7 +1487,7 @@ pub struct ProtoFacadeReport {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// `IaC` facade request placeholder.
+/// `IaC` facade request.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IacFacadeRequest {
@@ -1525,7 +1525,7 @@ pub struct IacFacadeReport {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Skills facade request placeholder.
+/// Skills facade request.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsFacadeRequest {
@@ -1537,7 +1537,7 @@ pub struct SkillsFacadeRequest {
     pub dry_run: bool,
 }
 
-/// Skills facade report placeholder.
+/// Skills facade report.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsFacadeReport {

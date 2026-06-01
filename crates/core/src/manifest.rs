@@ -942,7 +942,7 @@ fn default_core_infra_root() -> String {
 }
 
 fn default_agent_skills_root() -> String {
-    ".agent/skills".to_string()
+    ".agents/skills".to_string()
 }
 
 fn default_claude_skills_root() -> String {

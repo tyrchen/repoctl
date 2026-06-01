@@ -941,7 +941,7 @@ fn compute_affected(
     for changed_file in changed_files {
         if changed_file.as_str() == "repo.yaml"
             || changed_file.as_str().starts_with("templates/")
-            || changed_file.as_str().starts_with(".agent/skills/")
+            || changed_file.as_str().starts_with(".agents/skills/")
             || changed_file.as_str().starts_with(".claude/skills/")
             || changed_file.as_str().starts_with("crates/")
             || changed_file.as_str().starts_with("apps/repoctl-cli/")
@@ -1343,7 +1343,7 @@ mod tests {
             default_owner: None,
             protos_root: RepoRelativePath::new("protos").expect("path"),
             core_infra_root: RepoRelativePath::new("core-infra").expect("path"),
-            agent_skills_root: RepoRelativePath::new(".agent/skills").expect("path"),
+            agent_skills_root: RepoRelativePath::new(".agents/skills").expect("path"),
             claude_skills_root: RepoRelativePath::new(".claude/skills").expect("path"),
             context_output: RepoRelativePath::new("target/repoctl/context").expect("path"),
             generated_code_policy: repoctl_core::GeneratedCodePolicy::ConsumerLocal,
