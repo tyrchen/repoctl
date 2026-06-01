@@ -285,6 +285,9 @@ impl SkillsFacade {
 
 #[cfg(test)]
 mod tests {
+    // Facade tests build temporary repositories synchronously before invoking sync services.
+    #![allow(clippy::disallowed_methods)]
+
     use std::{fs, path::Path};
 
     use super::{

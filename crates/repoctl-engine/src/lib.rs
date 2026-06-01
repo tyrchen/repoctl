@@ -45,6 +45,9 @@ impl RepoctlEngine {
 
 #[cfg(test)]
 mod tests {
+    // Test fixtures build temporary repositories synchronously before invoking sync services.
+    #![allow(clippy::disallowed_methods)]
+
     use std::{fs, path::Path};
 
     use repoctl_core::{DiscoverRequest, RepoRelativePath};
