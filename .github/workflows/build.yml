@@ -38,7 +38,9 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - name: Install Rust
-        run: rustup toolchain install --component rustfmt --component clippy --component llvm-tools-preview
+        run: |
+          rustup toolchain install
+          rustup component add rustfmt clippy llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: install nextest
