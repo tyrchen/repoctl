@@ -136,16 +136,24 @@ impl PolicyRule for ProjectKindDependencyRule {
                 continue;
             };
             if target.kind == ProjectKind::App
-                && matches!(
-                    source.kind,
-                    ProjectKind::Framework | ProjectKind::FoundationService
-                )
+                && !matches!(source.kind, ProjectKind::App | ProjectKind::Tool)
             {
                 diagnostics.push(policy_error(
                     "policy.project_kind_dependency",
                     format!(
                         "{:?} `{}` must not depend on app `{}`",
                         source.kind, source.name, target.name
+                    ),
+                    source,
+                    edge.evidence.clone(),
+                ));
+            }
+            if target.kind == ProjectKind::Tool && source.kind == ProjectKind::App {
+                diagnostics.push(policy_error(
+                    "policy.project_kind_dependency",
+                    format!(
+                        "app `{}` must not depend on tool internals `{}`",
+                        source.name, target.name
                     ),
                     source,
                     edge.evidence.clone(),
@@ -276,6 +284,8 @@ impl PolicyRule for HighRiskIacRule {
     fn evaluate(&self, context: &PolicyContext<'_>) -> Result<Vec<Diagnostic>, RepoctlError> {
         let high_risk = compile_globs([
             "core-infra/**",
+            "core-infra/**/prod/**",
+            "core-infra/**/Pulumi.prod.yaml",
             "apps/*/iac/stacks/prod/**",
             "apps/*/iac/stacks/prod*",
             "foundations/*/iac/stacks/prod/**",

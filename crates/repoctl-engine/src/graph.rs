@@ -227,10 +227,14 @@ fn classify_declared_dependency(
             DependencySurface::FoundationPublicClient,
         ) => EdgeKind::UsesFoundationClient,
         (ProjectKind::App, ProjectKind::FoundationService, _) => EdgeKind::UsesFoundationInternal,
-        (_, ProjectKind::CoreInfra, DependencySurface::CoreInfraInternalModule) => {
-            EdgeKind::UsesCoreInfraInternalModule
+        (
+            _,
+            ProjectKind::CoreInfra | ProjectKind::CoreInfraComponent,
+            DependencySurface::CoreInfraInternalModule,
+        ) => EdgeKind::UsesCoreInfraInternalModule,
+        (_, ProjectKind::CoreInfra | ProjectKind::CoreInfraComponent, _) => {
+            EdgeKind::UsesCoreInfraModule
         }
-        (_, ProjectKind::CoreInfra, _) => EdgeKind::UsesCoreInfraModule,
         _ => EdgeKind::DependsOnProject,
     }
 }

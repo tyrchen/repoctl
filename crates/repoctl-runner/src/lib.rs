@@ -17,13 +17,13 @@ use std::{
 
 use globset::Glob;
 use repoctl_core::{
-    AffectedReason, AffectedReport, AffectedRequest, AiContext, AiContextRequest, CiMatrixReport,
-    CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic, EdgeKind,
+    AffectedReason, AffectedReport, AffectedRequest, AiContext, AiContextRequest, CiFallback,
+    CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic, EdgeKind,
     IacFacadeReport, IacFacadeRequest, IacProvider, PrSummary, PrSummaryRequest, ProcessCommand,
     ProcessOutput, ProcessRunner, ProjectManifest, ProjectName, ProtoFacadeReport,
     ProtoFacadeRequest, ProtoOperation, RepoRelativePath, RepoSnapshot, RepoctlError,
-    TaskCommandOutput, TaskName, TaskRunPlan, TaskRunReport, TaskRunRequest, ToolchainAdapter,
-    ToolchainEnvironmentInput, WorkspaceLanguage,
+    TaskCommandOutput, TaskDependency, TaskName, TaskRunPlan, TaskRunReport, TaskRunRequest,
+    Toolchain, ToolchainAdapter, ToolchainEnvironmentInput,
 };
 use repoctl_engine::RepoctlEngine;
 use serde_json::json;
@@ -105,8 +105,8 @@ impl ProcessRunner for LocalProcessRunner {
 pub struct RustToolchainAdapter;
 
 impl ToolchainAdapter for RustToolchainAdapter {
-    fn language(&self) -> WorkspaceLanguage {
-        WorkspaceLanguage::Rust
+    fn toolchain(&self) -> Toolchain {
+        Toolchain::Cargo
     }
 
     fn environment(
@@ -121,13 +121,76 @@ impl ToolchainAdapter for RustToolchainAdapter {
     }
 }
 
+/// npm task environment adapter.
+#[derive(Clone, Debug, Default)]
+pub struct NpmToolchainAdapter;
+
+impl ToolchainAdapter for NpmToolchainAdapter {
+    fn toolchain(&self) -> Toolchain {
+        Toolchain::Npm
+    }
+
+    fn environment(
+        &self,
+        input: &ToolchainEnvironmentInput<'_>,
+    ) -> Result<BTreeMap<String, String>, RepoctlError> {
+        let mut env = BTreeMap::new();
+        if let Some(cache_dir) = &input.workspace.cache_dir {
+            env.insert("NPM_CONFIG_CACHE".to_string(), cache_dir.to_string());
+        }
+        Ok(env)
+    }
+}
+
+/// pnpm task environment adapter.
+#[derive(Clone, Debug, Default)]
+pub struct PnpmToolchainAdapter;
+
+impl ToolchainAdapter for PnpmToolchainAdapter {
+    fn toolchain(&self) -> Toolchain {
+        Toolchain::Pnpm
+    }
+
+    fn environment(
+        &self,
+        input: &ToolchainEnvironmentInput<'_>,
+    ) -> Result<BTreeMap<String, String>, RepoctlError> {
+        let mut env = BTreeMap::new();
+        if let Some(cache_dir) = &input.workspace.cache_dir {
+            env.insert("PNPM_STORE_DIR".to_string(), cache_dir.to_string());
+        }
+        Ok(env)
+    }
+}
+
+/// Yarn task environment adapter.
+#[derive(Clone, Debug, Default)]
+pub struct YarnToolchainAdapter;
+
+impl ToolchainAdapter for YarnToolchainAdapter {
+    fn toolchain(&self) -> Toolchain {
+        Toolchain::Yarn
+    }
+
+    fn environment(
+        &self,
+        input: &ToolchainEnvironmentInput<'_>,
+    ) -> Result<BTreeMap<String, String>, RepoctlError> {
+        let mut env = BTreeMap::new();
+        if let Some(cache_dir) = &input.workspace.cache_dir {
+            env.insert("YARN_CACHE_FOLDER".to_string(), cache_dir.to_string());
+        }
+        Ok(env)
+    }
+}
+
 /// Bun task environment adapter.
 #[derive(Clone, Debug, Default)]
 pub struct BunToolchainAdapter;
 
 impl ToolchainAdapter for BunToolchainAdapter {
-    fn language(&self) -> WorkspaceLanguage {
-        WorkspaceLanguage::TypeScript
+    fn toolchain(&self) -> Toolchain {
+        Toolchain::Bun
     }
 
     fn environment(
@@ -147,8 +210,8 @@ impl ToolchainAdapter for BunToolchainAdapter {
 pub struct UvToolchainAdapter;
 
 impl ToolchainAdapter for UvToolchainAdapter {
-    fn language(&self) -> WorkspaceLanguage {
-        WorkspaceLanguage::Python
+    fn toolchain(&self) -> Toolchain {
+        Toolchain::Uv
     }
 
     fn environment(
@@ -323,6 +386,24 @@ impl RunnerService {
 
     /// Builds a CI matrix from affected task commands.
     pub fn ci_matrix(&self, request: &CiMatrixRequest) -> Result<CiMatrixReport, RepoctlError> {
+        if request.changed_files.is_empty() && request.base.is_none() && request.head.is_none() {
+            match request.fallback {
+                CiFallback::All => return self.ci_matrix_all(request),
+                CiFallback::None => {
+                    return Ok(CiMatrixReport {
+                        entries: Vec::new(),
+                        github_actions: json!({ "include": [] }),
+                    });
+                }
+                CiFallback::Error => {
+                    return Err(RepoctlError::diagnostic(Diagnostic::error(
+                        "ci.matrix.no_changed_files",
+                        "ci matrix cannot determine affected files without base/head or changed \
+                         files",
+                    )));
+                }
+            }
+        }
         let task_request = TaskRunRequest {
             repo: request.repo.clone(),
             tasks: request.tasks.clone(),
@@ -364,6 +445,46 @@ impl RunnerService {
         Ok(CiMatrixReport {
             entries,
             github_actions,
+        })
+    }
+
+    fn ci_matrix_all(&self, request: &CiMatrixRequest) -> Result<CiMatrixReport, RepoctlError> {
+        let task_request = TaskRunRequest {
+            repo: request.repo.clone(),
+            tasks: request.tasks.clone(),
+            projects: Vec::new(),
+            workspaces: Vec::new(),
+            affected: false,
+            changed_files: Vec::new(),
+            base: None,
+            head: None,
+            concurrency: None,
+            dry_run: true,
+        };
+        let plan = self.plan_tasks(&task_request)?;
+        let mut seen = BTreeSet::new();
+        let mut entries = Vec::new();
+        for command in plan.commands {
+            let project = command
+                .project
+                .map_or_else(String::new, |value| value.to_string());
+            let workspace = command
+                .workspace
+                .map_or_else(String::new, |value| value.to_string());
+            let task = command
+                .task
+                .map_or_else(String::new, |value| value.to_string());
+            if seen.insert((project.clone(), workspace.clone(), task.clone())) {
+                entries.push(json!({
+                    "project": project,
+                    "workspace": workspace,
+                    "task": task,
+                }));
+            }
+        }
+        Ok(CiMatrixReport {
+            github_actions: json!({ "include": entries.clone() }),
+            entries,
         })
     }
 
@@ -1170,7 +1291,7 @@ fn plan_task_commands(
     });
     let affected_workspaces =
         affected.map(|report| report.workspaces.iter().cloned().collect::<BTreeSet<_>>());
-    let mut commands = Vec::new();
+    let mut state = TaskPlanState::default();
     for project in &snapshot.projects {
         if !request.projects.is_empty() && !request.projects.contains(&project.name) {
             continue;
@@ -1194,48 +1315,167 @@ fn plan_task_commands(
                 {
                     continue;
                 }
-                let workspace = project
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.name == task_command.workspace)
-                    .ok_or_else(|| {
-                        RepoctlError::diagnostic(
-                            Diagnostic::error(
-                                "task.workspace_missing",
-                                format!(
-                                    "task `{task}` references missing workspace `{}`",
-                                    task_command.workspace
-                                ),
-                            )
-                            .with_project(project.name.as_str()),
-                        )
-                    })?;
-                let cwd = project
-                    .path
-                    .join_project(&workspace.root)
-                    .map_err(RepoctlError::diagnostic)?;
-                let absolute_cwd = Some(
-                    snapshot
-                        .root
-                        .absolute
-                        .join(cwd.as_str())
-                        .as_std_path()
-                        .to_path_buf(),
+                append_task_command_with_dependencies(
+                    snapshot,
+                    project,
+                    task,
+                    task_command,
+                    toolchain_adapters,
+                    &mut state,
                 );
-                commands.push(ProcessCommand {
-                    project: Some(project.name.clone()),
-                    workspace: Some(workspace.name.clone()),
-                    task: Some(task.clone()),
-                    cwd,
-                    absolute_cwd,
-                    program: task_command.command.program.clone(),
-                    args: task_command.command.args.clone(),
-                    env: toolchain_env(workspace, toolchain_adapters)?,
-                });
             }
         }
     }
-    Ok(commands)
+    state.commands.into_iter().collect()
+}
+
+#[derive(Debug, Default)]
+struct TaskPlanState {
+    commands: Vec<Result<ProcessCommand, RepoctlError>>,
+    seen: BTreeSet<(ProjectName, repoctl_core::WorkspaceName, TaskName)>,
+    stack: BTreeSet<(ProjectName, repoctl_core::WorkspaceName, TaskName)>,
+}
+
+fn append_task_command_with_dependencies(
+    snapshot: &RepoSnapshot,
+    project: &ProjectManifest,
+    task: &TaskName,
+    task_command: &repoctl_core::TaskCommand,
+    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
+    state: &mut TaskPlanState,
+) {
+    let key = (
+        project.name.clone(),
+        task_command.workspace.clone(),
+        task.clone(),
+    );
+    if state.seen.contains(&key) {
+        return;
+    }
+    if !state.stack.insert(key.clone()) {
+        state.commands.push(Err(RepoctlError::diagnostic(
+            Diagnostic::error("task.dependency_cycle", "task prerequisite cycle detected")
+                .with_project(project.name.as_str()),
+        )));
+        return;
+    }
+    for dependency in &task_command.depends_on {
+        append_task_dependency(snapshot, dependency, toolchain_adapters, state);
+    }
+    state.commands.push(build_process_command(
+        snapshot,
+        project,
+        task,
+        task_command,
+        toolchain_adapters,
+    ));
+    state.seen.insert(key.clone());
+    state.stack.remove(&key);
+}
+
+fn append_task_dependency(
+    snapshot: &RepoSnapshot,
+    dependency: &TaskDependency,
+    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
+    state: &mut TaskPlanState,
+) {
+    let Some(project) = snapshot.project(&dependency.project) else {
+        state.commands.push(Err(RepoctlError::diagnostic(
+            Diagnostic::error(
+                "task.dependency_project_missing",
+                format!(
+                    "task prerequisite references missing project `{}`",
+                    dependency.project
+                ),
+            )
+            .with_project(dependency.project.as_str()),
+        )));
+        return;
+    };
+    let Some(task_commands) = project.tasks.get(&dependency.task) else {
+        state.commands.push(Err(RepoctlError::diagnostic(
+            Diagnostic::error(
+                "task.dependency_task_missing",
+                format!(
+                    "task prerequisite references missing task `{}`",
+                    dependency.task
+                ),
+            )
+            .with_project(project.name.as_str()),
+        )));
+        return;
+    };
+    for task_command in task_commands {
+        if task_command.workspace != dependency.workspace {
+            continue;
+        }
+        append_task_command_with_dependencies(
+            snapshot,
+            project,
+            &dependency.task,
+            task_command,
+            toolchain_adapters,
+            state,
+        );
+        return;
+    }
+    state.commands.push(Err(RepoctlError::diagnostic(
+        Diagnostic::error(
+            "task.dependency_workspace_missing",
+            format!(
+                "task prerequisite references missing workspace `{}`",
+                dependency.workspace
+            ),
+        )
+        .with_project(project.name.as_str()),
+    )));
+}
+
+fn build_process_command(
+    snapshot: &RepoSnapshot,
+    project: &ProjectManifest,
+    task: &TaskName,
+    task_command: &repoctl_core::TaskCommand,
+    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
+) -> Result<ProcessCommand, RepoctlError> {
+    let workspace = project
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.name == task_command.workspace)
+        .ok_or_else(|| {
+            RepoctlError::diagnostic(
+                Diagnostic::error(
+                    "task.workspace_missing",
+                    format!(
+                        "task `{task}` references missing workspace `{}`",
+                        task_command.workspace
+                    ),
+                )
+                .with_project(project.name.as_str()),
+            )
+        })?;
+    let cwd = project
+        .path
+        .join_project(&workspace.root)
+        .map_err(RepoctlError::diagnostic)?;
+    let absolute_cwd = Some(
+        snapshot
+            .root
+            .absolute
+            .join(cwd.as_str())
+            .as_std_path()
+            .to_path_buf(),
+    );
+    Ok(ProcessCommand {
+        project: Some(project.name.clone()),
+        workspace: Some(workspace.name.clone()),
+        task: Some(task.clone()),
+        cwd,
+        absolute_cwd,
+        program: task_command.command.program.clone(),
+        args: task_command.command.args.clone(),
+        env: toolchain_env(workspace, toolchain_adapters)?,
+    })
 }
 
 fn toolchain_env(
@@ -1243,8 +1483,11 @@ fn toolchain_env(
     toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
 ) -> Result<BTreeMap<String, String>, RepoctlError> {
     let mut env = BTreeMap::new();
+    let Some(toolchain) = &workspace.toolchain else {
+        return Ok(env);
+    };
     for adapter in toolchain_adapters {
-        if adapter.language() == workspace.language {
+        if adapter.toolchain() == *toolchain {
             env.extend(adapter.environment(&ToolchainEnvironmentInput { workspace })?);
         }
     }
@@ -1254,6 +1497,9 @@ fn toolchain_env(
 fn default_toolchain_adapters() -> Vec<Arc<dyn ToolchainAdapter>> {
     vec![
         Arc::new(RustToolchainAdapter),
+        Arc::new(NpmToolchainAdapter),
+        Arc::new(PnpmToolchainAdapter),
+        Arc::new(YarnToolchainAdapter),
         Arc::new(BunToolchainAdapter),
         Arc::new(UvToolchainAdapter),
     ]
@@ -1301,7 +1547,8 @@ fn unique_strings(values: Vec<String>) -> Vec<String> {
 mod tests {
     use repoctl_core::{
         CommandSpec, ProjectKind, ProjectRelativePath, RepoGraph, RepoManifest, RepoName,
-        RepoPolicySet, RepoRoot, SchemaId, TaskCommand, WorkspaceName, WorkspaceSpec,
+        RepoPolicySet, RepoRoot, SchemaId, TaskCommand, WorkspaceLanguage, WorkspaceName,
+        WorkspaceSpec,
     };
 
     use super::*;
@@ -1355,6 +1602,7 @@ mod tests {
             vec![TaskCommand {
                 workspace: WorkspaceName::new("api").expect("workspace"),
                 command: CommandSpec::parse("cargo check --workspace").expect("command"),
+                depends_on: Vec::new(),
             }],
         );
         let project = ProjectManifest {
@@ -1367,7 +1615,7 @@ mod tests {
             workspaces: vec![WorkspaceSpec {
                 name: WorkspaceName::new("api").expect("workspace"),
                 language: WorkspaceLanguage::Rust,
-                toolchain: None,
+                toolchain: Some(Toolchain::Cargo),
                 root: ProjectRelativePath::new(".").expect("path"),
                 manifest: ProjectRelativePath::new("Cargo.toml").expect("path"),
                 lockfile: None,

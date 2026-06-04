@@ -11,6 +11,7 @@ This guide is for people using `repoctl` inside a monorepo. It focuses on daily 
 - Foundation services are company-level business services with owned APIs, proto contracts, and clients.
 - Proto roots own source proto packages. Generated code is treated as managed output.
 - Core infrastructure owns shared infrastructure, separate from app-local IaC.
+- Tools are developer, agent, and repository automation projects under `tools/`.
 
 The graph is built from `repo.yaml` and every discovered `project.yaml`. Most commands first resolve the repository root, parse those manifests, validate domain values, then run the requested operation.
 
@@ -45,6 +46,9 @@ repoctl new framework runtime --owner @platform
 
 repoctl new foundation identity --owner @identity
 # foundations/identity
+
+repoctl new tool skills --owner @platform
+# tools/skills
 ```
 
 You can also pass explicit paths when you want the command to be unambiguous:
@@ -62,6 +66,16 @@ Run graph validation after changing manifests, dependencies, proto ownership, ge
 ```bash
 repoctl graph validate
 ```
+
+Validation modes let you choose how much environment metadata to inspect:
+
+```bash
+repoctl graph validate --mode structural
+repoctl graph validate --mode metadata
+repoctl graph validate --mode full
+```
+
+Use `structural` for manifest and policy validation without package-manager or registry access. Use `metadata` when local language metadata is available. Use `full` when you want the broadest validation before release.
 
 Use path-specific checks when a PR touches only a few files:
 
@@ -148,6 +162,14 @@ For local inspection:
 repoctl ci matrix --tasks check,test,build
 ```
 
+When no base/head range is available, choose a fallback explicitly:
+
+```bash
+repoctl ci matrix --tasks check,test,build --fallback all
+repoctl ci matrix --tasks check,test,build --fallback none
+repoctl ci matrix --tasks check,test,build --fallback error
+```
+
 For GitHub Actions matrix JSON:
 
 ```bash
@@ -159,6 +181,62 @@ repoctl ci matrix \
 ```
 
 Use `repoctl ci summarize` when a workflow needs a repo-level CI summary.
+
+Render or refresh the maintained GitHub Actions workflow:
+
+```bash
+repoctl ci workflow --provider github-actions
+repoctl ci workflow --provider github-actions --write
+```
+
+Run one matrix entry locally:
+
+```bash
+repoctl ci run-step --project apps.catalog --workspace api --task check
+```
+
+## Adopt existing repositories
+
+Adoption is plan-first. Generate a reviewed plan from existing standalone repositories:
+
+```bash
+repoctl adopt plan \
+  --source ~/projects/cellis \
+  --dest ~/projects/cellis/universe \
+  --exclude synapse \
+  --format json > target/repoctl/adopt-plan.json
+```
+
+Use overrides when placement confidence is low or when the inferred lane is wrong:
+
+```bash
+repoctl adopt plan \
+  --source source \
+  --dest dest \
+  --map operon=frameworks/operon \
+  --kind skills=tool \
+  --owner operon=@platform
+```
+
+Apply and verify the reviewed plan:
+
+```bash
+repoctl adopt apply --plan target/repoctl/adopt-plan.json
+repoctl adopt verify --plan target/repoctl/adopt-plan.json
+```
+
+The plan reports placement decisions, copied files, generated manifests, dependency rewrites, CI operations, hygiene warnings, prerequisites, and verification commands. Source repositories are not modified.
+
+## Check hygiene
+
+Run hygiene checks after adoption or any broad copy operation:
+
+```bash
+repoctl hygiene check
+repoctl hygiene clean --dry-run
+```
+
+Hygiene detects nested `.git`, nested `.github`, `node_modules`, `target`, `dist`, frontend caches, and other generated artifacts. Clean plans only include generated artifacts; source files and lockfiles are not deleted.
 
 ## Work with templates
 

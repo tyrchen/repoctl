@@ -11,9 +11,9 @@ use crate::{
         CommandSpec, DeploySpec, GeneratedCodePolicy, IacProvider, IacSpec, OwnerHandle,
         PolicyMode, ProjectAiSpec, ProjectAreas, ProjectDependency, ProjectKind, ProjectManifest,
         ProjectName, ProjectProtoSpec, ProjectRelativePath, RepoGlob, RepoLayout, RepoManifest,
-        RepoName, RepoPolicySet, RepoRelativePath, SchemaId, TaskCommand, TaskName, TemplateFile,
-        TemplateInput, TemplateManifest, Visibility, WorkspaceLanguage, WorkspaceName,
-        WorkspaceSpec,
+        RepoName, RepoPolicySet, RepoRelativePath, SchemaId, TaskCommand, TaskDependency, TaskName,
+        TemplateFile, TemplateInput, TemplateManifest, Toolchain, Visibility, WorkspaceLanguage,
+        WorkspaceName, WorkspaceSpec,
     },
     ports::ManifestParser,
 };
@@ -376,6 +376,16 @@ struct RawWorkspaceSpec {
 struct RawTaskCommand {
     workspace: String,
     command: String,
+    #[serde(default)]
+    depends_on: Vec<RawTaskDependency>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawTaskDependency {
+    project: String,
+    workspace: String,
+    task: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -543,7 +553,11 @@ impl RawWorkspaceSpec {
         Ok(WorkspaceSpec {
             name: WorkspaceName::new(self.name)?,
             language: parse_workspace_language(&self.language)?,
-            toolchain: self.toolchain,
+            toolchain: self
+                .toolchain
+                .as_deref()
+                .map(Toolchain::parse)
+                .transpose()?,
             root,
             manifest,
             lockfile: self.lockfile.map(ProjectRelativePath::new).transpose()?,
@@ -566,6 +580,21 @@ impl RawTaskCommand {
         Ok(TaskCommand {
             workspace: WorkspaceName::new(self.workspace)?,
             command: CommandSpec::parse(&self.command)?,
+            depends_on: self
+                .depends_on
+                .into_iter()
+                .map(RawTaskDependency::into_domain)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+impl RawTaskDependency {
+    fn into_domain(self) -> Result<TaskDependency, Diagnostic> {
+        Ok(TaskDependency {
+            project: ProjectName::new(self.project)?,
+            workspace: WorkspaceName::new(self.workspace)?,
+            task: TaskName::new(self.task)?,
         })
     }
 }
@@ -810,6 +839,8 @@ fn parse_project_kind(value: &str) -> Result<ProjectKind, Diagnostic> {
         "foundation-service" => Ok(ProjectKind::FoundationService),
         "proto-root" => Ok(ProjectKind::ProtoRoot),
         "core-infra" => Ok(ProjectKind::CoreInfra),
+        "core-infra-component" => Ok(ProjectKind::CoreInfraComponent),
+        "tool" => Ok(ProjectKind::Tool),
         _ => Err(Diagnostic::error(
             "manifest.project.kind",
             format!("unsupported project kind `{value}`"),

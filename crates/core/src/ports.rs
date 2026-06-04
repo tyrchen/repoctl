@@ -8,7 +8,7 @@ use crate::{
     domain::{
         EdgeKind, GraphEdge, ProcessCommand, ProcessOutput, ProjectManifest, RepoGraph,
         RepoRelativePath, RepoRoot, RepoSnapshot, ResolvedTemplateSource, TemplateManifest,
-        TemplateSource, WorkspaceLanguage, WorkspaceSpec,
+        TemplateSource, Toolchain, WorkspaceLanguage, WorkspaceSpec,
     },
     manifest::ManifestSource,
 };
@@ -231,10 +231,10 @@ pub struct ToolchainEnvironmentInput<'a> {
     pub workspace: &'a WorkspaceSpec,
 }
 
-/// Supplies task environment variables for one workspace language.
+/// Supplies task environment variables for one workspace toolchain.
 pub trait ToolchainAdapter: Send + Sync {
-    /// Language handled by the adapter.
-    fn language(&self) -> WorkspaceLanguage;
+    /// Toolchain handled by the adapter.
+    fn toolchain(&self) -> Toolchain;
 
     /// Returns environment variables for the workspace.
     fn environment(

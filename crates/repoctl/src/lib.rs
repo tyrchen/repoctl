@@ -5,13 +5,28 @@
 #![allow(clippy::missing_errors_doc)]
 // Facade methods intentionally own request DTOs so frontends can build-and-call without lifetimes.
 #![allow(clippy::needless_pass_by_value)]
+// Adoption and hygiene facade operations are synchronous CLI orchestration, not async services.
+#![allow(clippy::disallowed_methods)]
 
 //! Public repoctl facade consumed by CLI and other frontends.
 
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use camino::{Utf8Path, Utf8PathBuf};
 pub use repoctl_core::*;
-use repoctl_engine::RepoctlEngine;
+use repoctl_engine::{
+    DefaultGraphBuilder, DefaultRepoLocator, DiscoveryService, LocalRepoFileSystem, RepoctlEngine,
+};
 use repoctl_runner::RunnerService;
 use repoctl_scaffold::ScaffoldService;
+use serde_json::Value;
+use toml_edit::{DocumentMut, InlineTable, Item, Value as TomlValue, value};
 
 /// Typed repoctl facade.
 #[derive(Clone, Debug)]
@@ -51,7 +66,11 @@ impl Repoctl {
         &self,
         request: GraphValidateRequest,
     ) -> Result<ValidationReport, RepoctlError> {
-        let snapshot = self.discover(DiscoverRequest { repo: request.repo })?;
+        let snapshot = if request.mode == ValidationMode::Structural {
+            structural_discovery().discover(&DiscoverRequest { repo: request.repo })?
+        } else {
+            self.discover(DiscoverRequest { repo: request.repo })?
+        };
         let diagnostics = self
             .engine
             .policies()
@@ -117,6 +136,7 @@ impl Repoctl {
         let report = self.validate_graph(GraphValidateRequest {
             repo: request.repo,
             changed_files: request.changed_files,
+            mode: ValidationMode::Structural,
         })?;
         Ok(BoundaryLintReport {
             diagnostics: report.diagnostics,
@@ -135,6 +155,7 @@ impl Repoctl {
             let report = self.validate_graph(GraphValidateRequest {
                 repo: request.repo,
                 changed_files: Vec::new(),
+                mode: ValidationMode::Structural,
             })?;
             if !report.is_success() {
                 return Err(RepoctlError::Diagnostics {
@@ -158,6 +179,114 @@ impl Repoctl {
     /// Builds a CI matrix.
     pub fn ci_matrix(&self, request: CiMatrixRequest) -> Result<CiMatrixReport, RepoctlError> {
         self.runner.ci_matrix(&request)
+    }
+
+    /// Renders a CI workflow.
+    pub fn ci_workflow(
+        &self,
+        request: CiWorkflowRequest,
+    ) -> Result<CiWorkflowReport, RepoctlError> {
+        let snapshot = self.discover(DiscoverRequest {
+            repo: request.repo.clone(),
+        })?;
+        let path = RepoRelativePath::new(".github/workflows/repoctl.yml")
+            .map_err(RepoctlError::diagnostic)?;
+        let content = render_github_actions_workflow(&snapshot)?;
+        let operation = FileOperation {
+            path: path.clone(),
+            operation: if request.write {
+                "write-file".to_string()
+            } else {
+                "plan-file".to_string()
+            },
+            content: Some(content.clone()),
+        };
+        if request.write {
+            let root = snapshot.root.absolute.as_std_path();
+            write_utf8_file(root, &path, &content)?;
+        }
+        Ok(CiWorkflowReport {
+            path,
+            content,
+            operations: vec![operation],
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// Checks generated artifact hygiene.
+    pub fn hygiene_check(
+        &self,
+        request: HygieneCheckRequest,
+    ) -> Result<HygieneReport, RepoctlError> {
+        let root = locate_repo_path(request.repo.as_deref())?;
+        hygiene_report(&root, false)
+    }
+
+    /// Plans or applies generated artifact cleanup.
+    pub fn hygiene_clean(
+        &self,
+        request: HygieneCleanRequest,
+    ) -> Result<HygieneReport, RepoctlError> {
+        let root = locate_repo_path(request.repo.as_deref())?;
+        let report = hygiene_report(&root, true)?;
+        if !request.dry_run {
+            for operation in &report.operations {
+                let target = root.join(operation.path.as_str());
+                if target.is_dir() {
+                    fs::remove_dir_all(&target).map_err(|source| {
+                        RepoctlError::Environment(format!(
+                            "failed to remove `{}`: {source}",
+                            target.display()
+                        ))
+                    })?;
+                } else if target.is_file() {
+                    fs::remove_file(&target).map_err(|source| {
+                        RepoctlError::Environment(format!(
+                            "failed to remove `{}`: {source}",
+                            target.display()
+                        ))
+                    })?;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Creates a reviewed adoption plan.
+    pub fn adopt_plan(&self, request: AdoptionPlanRequest) -> Result<AdoptionPlan, RepoctlError> {
+        plan_adoption(&request, self)
+    }
+
+    /// Applies a reviewed adoption plan.
+    pub fn adopt_apply(&self, request: AdoptionApplyRequest) -> Result<AdoptionPlan, RepoctlError> {
+        if request.refresh {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.refresh.unsupported",
+                "refresh is not supported by apply; rerun adopt plan and review the new plan",
+            )));
+        }
+        let plan = read_adoption_plan(&request.plan)?;
+        apply_adoption_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// Verifies a reviewed adoption plan without copying files.
+    pub fn adopt_verify(
+        &self,
+        request: AdoptionVerifyRequest,
+    ) -> Result<ValidationReport, RepoctlError> {
+        let plan = read_adoption_plan(&request.plan)?;
+        let report = self.validate_graph(GraphValidateRequest {
+            repo: Some(plan.dest_root.as_std_path().to_path_buf()),
+            changed_files: Vec::new(),
+            mode: ValidationMode::Structural,
+        })?;
+        let hygiene = self.hygiene_check(HygieneCheckRequest {
+            repo: Some(plan.dest_root.as_std_path().to_path_buf()),
+        })?;
+        let mut diagnostics = report.diagnostics;
+        diagnostics.extend(hygiene.diagnostics);
+        Ok(ValidationReport::new(diagnostics))
     }
 
     /// Lists available templates.
@@ -283,6 +412,1692 @@ impl SkillsFacade {
     }
 }
 
+fn structural_discovery() -> DiscoveryService {
+    DiscoveryService::new(
+        Arc::new(DefaultRepoLocator),
+        Arc::new(LocalRepoFileSystem),
+        Arc::new(repoctl_core::YamlManifestParser),
+        Arc::new(DefaultGraphBuilder::new(Vec::new())),
+    )
+}
+
+const ADOPTION_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    ".github",
+    "target",
+    "node_modules",
+    "dist",
+    ".next",
+    ".turbo",
+    ".cache",
+];
+
+const HYGIENE_GENERATED_DIRS: &[&str] = &[
+    ".git",
+    ".github",
+    "node_modules",
+    "target",
+    "dist",
+    ".next",
+    ".turbo",
+    ".cache",
+];
+
+fn locate_repo_path(start: Option<&Path>) -> Result<PathBuf, RepoctlError> {
+    let mut current = match start {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir()
+            .map_err(|source| RepoctlError::Environment(format!("failed to read cwd: {source}")))?,
+    };
+    if current.is_file() {
+        current.pop();
+    }
+    loop {
+        if current.join("repo.yaml").is_file() {
+            return Ok(current);
+        }
+        if !current.pop() {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "repo.locate",
+                "could not find repo.yaml from the requested path",
+            )));
+        }
+    }
+}
+
+fn utf8_absolute(path: &Path) -> Result<Utf8PathBuf, RepoctlError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| RepoctlError::Environment(format!("failed to read cwd: {source}")))?
+            .join(path)
+    };
+    Utf8PathBuf::from_path_buf(absolute).map_err(|path| {
+        RepoctlError::diagnostic(Diagnostic::error(
+            "path.non_utf8",
+            format!("path is not valid UTF-8: {}", path.display()),
+        ))
+    })
+}
+
+fn read_adoption_plan(path: &Path) -> Result<AdoptionPlan, RepoctlError> {
+    let bytes =
+        fs::read(path).map_err(|source| RepoctlError::io(path.display().to_string(), source))?;
+    serde_json::from_slice(&bytes).map_err(|source| {
+        RepoctlError::diagnostic(
+            Diagnostic::error(
+                "adoption.plan.json",
+                format!("failed to parse plan JSON: {source}"),
+            )
+            .with_path(path.display().to_string()),
+        )
+    })
+}
+
+fn plan_adoption(
+    request: &AdoptionPlanRequest,
+    repoctl: &Repoctl,
+) -> Result<AdoptionPlan, RepoctlError> {
+    let source_root = utf8_absolute(&request.source)?;
+    let dest_root = utf8_absolute(&request.dest)?;
+    if !dest_root.join("repo.yaml").is_file() {
+        return Err(RepoctlError::diagnostic(Diagnostic::error(
+            "adoption.dest.uninitialized",
+            "destination must be an initialized repoctl monorepo with repo.yaml",
+        )));
+    }
+
+    let mut source_plan = plan_adoption_sources(request, &source_root, &dest_root)?;
+
+    let dependency_rewrites = if request.rewrite_deps == DependencyRewriteMode::Off {
+        Vec::new()
+    } else {
+        let package_index = build_adopted_package_index(&source_plan.sources)?;
+        plan_dependency_rewrites(&source_plan.sources, &package_index)?
+    };
+    if request.rewrite_deps == DependencyRewriteMode::Auto {
+        apply_rewrites_to_operations(&mut source_plan.operations, &dependency_rewrites)?;
+    }
+    let ci_operations = if request.ci == AdoptionCiMode::Off {
+        Vec::new()
+    } else {
+        let workflow = repoctl.ci_workflow(CiWorkflowRequest {
+            repo: Some(dest_root.as_std_path().to_path_buf()),
+            provider: CiProvider::GitHubActions,
+            write: false,
+        })?;
+        workflow.operations
+    };
+    let verification = adoption_verification_plan(
+        &dest_root,
+        request.verification.clone(),
+        &source_plan.sources,
+    );
+
+    Ok(AdoptionPlan {
+        source_root,
+        dest_root,
+        sources: source_plan.sources,
+        operations: source_plan.operations,
+        dependency_rewrites,
+        manifest_syntheses: source_plan.manifest_syntheses,
+        ci_operations,
+        verification,
+        diagnostics: source_plan.diagnostics,
+    })
+}
+
+#[derive(Debug, Default)]
+struct AdoptionSourcePlan {
+    sources: Vec<AdoptedSource>,
+    operations: Vec<AdoptionFileOperation>,
+    manifest_syntheses: Vec<ProjectManifestSynthesis>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+fn plan_adoption_sources(
+    request: &AdoptionPlanRequest,
+    source_root: &Utf8Path,
+    dest_root: &Utf8Path,
+) -> Result<AdoptionSourcePlan, RepoctlError> {
+    let candidates = source_repositories(source_root)?;
+    let mut plan = AdoptionSourcePlan::default();
+    for source_path in candidates {
+        append_adoption_source(request, dest_root, source_path, &mut plan)?;
+    }
+    Ok(plan)
+}
+
+fn append_adoption_source(
+    request: &AdoptionPlanRequest,
+    dest_root: &Utf8Path,
+    source_path: Utf8PathBuf,
+    plan: &mut AdoptionSourcePlan,
+) -> Result<(), RepoctlError> {
+    let name = source_name(&source_path)?;
+    let include_selected = request.include.is_empty() || request.include.contains(&name);
+    let skipped = !include_selected || request.exclude.contains(&name);
+    let inventory = inventory_source(&source_path, &name)?;
+    let placement = infer_placement(
+        &name,
+        &inventory,
+        request.map.get(&name).cloned(),
+        request.kind.get(&name).cloned(),
+    );
+    if skipped {
+        plan.sources.push(adopted_source(
+            name,
+            source_path,
+            placement,
+            inventory,
+            true,
+        ));
+        return Ok(());
+    }
+    if placement.confidence < 0.75 && !placement.override_applied {
+        plan.diagnostics.push(
+            Diagnostic::error(
+                "adoption.placement.low_confidence",
+                format!(
+                    "source `{name}` placement confidence {:.2} requires --map",
+                    placement.confidence
+                ),
+            )
+            .with_help(format!(
+                "pass --map {name}=<lane>/{name} and optionally --kind {name}=<kind>"
+            )),
+        );
+    }
+    let owner = request
+        .owner
+        .get(&name)
+        .cloned()
+        .or_else(|| OwnerHandle::new(format!("@{name}")).ok());
+    let manifest = synthesize_project_manifest(&name, &placement, &inventory, owner.as_ref())?;
+    plan.operations.extend(copy_operations_for_source(
+        &source_path,
+        &placement.destination,
+        dest_root,
+    )?);
+    let manifest_path = placement
+        .destination
+        .join_project(&ProjectRelativePath::new("project.yaml").map_err(RepoctlError::diagnostic)?)
+        .map_err(RepoctlError::diagnostic)?;
+    plan.operations.push(AdoptionFileOperation {
+        id: format!("adoption.manifest.{name}"),
+        operation: "write-file".to_string(),
+        source_path: None,
+        destination_path: manifest_path.clone(),
+        content: Some(manifest.clone()),
+        checksum: None,
+    });
+    plan.manifest_syntheses.push(ProjectManifestSynthesis {
+        source: name.clone(),
+        project: project_name_for_destination(&placement.destination, &placement.kind)?,
+        manifest_path,
+        content: manifest,
+    });
+    plan.sources.push(adopted_source(
+        name,
+        source_path,
+        placement,
+        inventory,
+        false,
+    ));
+    Ok(())
+}
+
+fn adopted_source(
+    name: String,
+    source_path: Utf8PathBuf,
+    placement: PlacementDecision,
+    inventory: SourceInventory,
+    skipped: bool,
+) -> AdoptedSource {
+    AdoptedSource {
+        name,
+        source_path,
+        destination_path: placement.destination,
+        inferred_kind: placement.kind,
+        confidence: placement.confidence,
+        reasons: placement.reasons,
+        inventory,
+        skipped,
+        override_applied: placement.override_applied,
+    }
+}
+
+fn apply_adoption_plan(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
+    let mut diagnostics = plan.diagnostics.clone();
+    diagnostics.extend(plan.sources.iter().filter_map(|source| {
+        if source.skipped || source.override_applied || source.confidence >= 0.75 {
+            None
+        } else {
+            Some(
+                Diagnostic::error(
+                    "adoption.placement.low_confidence",
+                    format!(
+                        "source `{}` placement confidence {:.2} requires a reviewed override",
+                        source.name, source.confidence
+                    ),
+                )
+                .with_path(source.destination_path.as_str()),
+            )
+        }
+    }));
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return Err(RepoctlError::Diagnostics { diagnostics });
+    }
+    for operation in &plan.operations {
+        apply_adoption_operation(plan, operation)?;
+    }
+    for operation in &plan.ci_operations {
+        if let Some(content) = &operation.content {
+            write_utf8_file(plan.dest_root.as_std_path(), &operation.path, content)?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_adoption_operation(
+    plan: &AdoptionPlan,
+    operation: &AdoptionFileOperation,
+) -> Result<(), RepoctlError> {
+    if operation.operation == "reject-symlink" {
+        return Err(RepoctlError::diagnostic(
+            Diagnostic::error(
+                "adoption.copy.symlink_rejected",
+                format!(
+                    "source symlink for `{}` is not allowed",
+                    operation.destination_path
+                ),
+            )
+            .with_path(operation.destination_path.as_str()),
+        ));
+    }
+    let destination = plan.dest_root.join(operation.destination_path.as_str());
+    if let Some(content) = &operation.content {
+        write_utf8_file(
+            plan.dest_root.as_std_path(),
+            &operation.destination_path,
+            content,
+        )?;
+        return Ok(());
+    }
+    let Some(source) = &operation.source_path else {
+        return Ok(());
+    };
+    if destination.exists() {
+        return Err(RepoctlError::diagnostic(
+            Diagnostic::error(
+                "adoption.copy.conflict",
+                format!(
+                    "destination `{}` already exists",
+                    operation.destination_path
+                ),
+            )
+            .with_path(operation.destination_path.as_str()),
+        ));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|source| RepoctlError::io(parent.as_str().to_string(), source))?;
+    }
+    fs::copy(source, &destination)
+        .map_err(|source_error| RepoctlError::io(destination.as_str().to_string(), source_error))?;
+    let metadata = fs::metadata(source)
+        .map_err(|source_error| RepoctlError::io(source.as_str().to_string(), source_error))?;
+    fs::set_permissions(&destination, metadata.permissions())
+        .map_err(|source_error| RepoctlError::io(destination.as_str().to_string(), source_error))?;
+    Ok(())
+}
+
+fn source_repositories(source_root: &Utf8Path) -> Result<Vec<Utf8PathBuf>, RepoctlError> {
+    if source_root.join("Cargo.toml").is_file()
+        || source_root.join("package.json").is_file()
+        || source_root.join("project.yaml").is_file()
+        || source_root.join("Pulumi.yaml").is_file()
+    {
+        return Ok(vec![source_root.to_path_buf()]);
+    }
+    let mut repos = Vec::new();
+    let entries = fs::read_dir(source_root)
+        .map_err(|source| RepoctlError::io(source_root.to_path_buf(), source))?;
+    for entry in entries {
+        let entry = entry.map_err(|source| RepoctlError::io(source_root.to_path_buf(), source))?;
+        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "path.non_utf8",
+                format!("path is not valid UTF-8: {}", path.display()),
+            ))
+        })?;
+        if path.is_dir()
+            && (path.join("Cargo.toml").is_file()
+                || path.join("package.json").is_file()
+                || path.join("project.yaml").is_file()
+                || path.join("Pulumi.yaml").is_file()
+                || path.join("README.md").is_file())
+        {
+            repos.push(path);
+        }
+    }
+    repos.sort();
+    Ok(repos)
+}
+
+fn source_name(path: &Utf8Path) -> Result<String, RepoctlError> {
+    path.file_name().map(ToString::to_string).ok_or_else(|| {
+        RepoctlError::diagnostic(Diagnostic::error(
+            "adoption.source.name",
+            "source path must have a directory name",
+        ))
+    })
+}
+
+fn inventory_source(source_path: &Utf8Path, name: &str) -> Result<SourceInventory, RepoctlError> {
+    let mut manifests = Vec::new();
+    let mut top_level_dirs = Vec::new();
+    let mut dependencies = BTreeSet::new();
+    let mut generated = Vec::new();
+    let mut tools = BTreeSet::new();
+    let has_vcs = source_path.join(".git").exists();
+    let readme_summary = read_readme_summary(source_path)?;
+
+    for entry in fs::read_dir(source_path)
+        .map_err(|source| RepoctlError::io(source_path.to_path_buf(), source))?
+    {
+        let entry = entry.map_err(|source| RepoctlError::io(source_path.to_path_buf(), source))?;
+        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "path.non_utf8",
+                format!("path is not valid UTF-8: {}", path.display()),
+            ))
+        })?;
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        if path.is_dir() {
+            top_level_dirs.push(file_name.to_string());
+        }
+    }
+
+    collect_inventory_files(
+        source_path,
+        source_path,
+        &mut manifests,
+        &mut dependencies,
+        &mut generated,
+        &mut tools,
+    )?;
+    top_level_dirs.sort();
+    manifests.sort();
+    generated.sort();
+    Ok(SourceInventory {
+        name: name.to_string(),
+        has_vcs,
+        readme_summary,
+        manifests,
+        top_level_dirs,
+        dependency_references: dependencies.into_iter().collect(),
+        generated_artifacts: generated,
+        required_tools: tools.into_iter().collect(),
+    })
+}
+
+fn collect_inventory_files(
+    root: &Utf8Path,
+    current: &Utf8Path,
+    manifests: &mut Vec<String>,
+    dependencies: &mut BTreeSet<String>,
+    generated: &mut Vec<String>,
+    tools: &mut BTreeSet<String>,
+) -> Result<(), RepoctlError> {
+    for entry in
+        fs::read_dir(current).map_err(|source| RepoctlError::io(current.to_path_buf(), source))?
+    {
+        let entry = entry.map_err(|source| RepoctlError::io(current.to_path_buf(), source))?;
+        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "path.non_utf8",
+                format!("path is not valid UTF-8: {}", path.display()),
+            ))
+        })?;
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(root)
+            .map_or_else(|_| name.to_string(), |value| value.as_str().to_string());
+        if path.is_dir() {
+            if ADOPTION_EXCLUDED_DIRS.contains(&name) {
+                generated.push(rel);
+                continue;
+            }
+            collect_inventory_files(root, &path, manifests, dependencies, generated, tools)?;
+            continue;
+        }
+        if is_primary_manifest(name)
+            || rel.ends_with("/package.json")
+            || rel.ends_with("/Cargo.toml")
+        {
+            manifests.push(rel.clone());
+        }
+        if name == "Cargo.toml" {
+            collect_cargo_dependencies(&path, dependencies, tools)?;
+        } else if name == "package.json" {
+            collect_package_json_dependencies(&path, dependencies, tools)?;
+        } else if name == "build.rs" {
+            let content = fs::read_to_string(&path)
+                .map_err(|source| RepoctlError::io(path.clone(), source))?;
+            if content.contains("prost_build") || content.contains("protoc") {
+                tools.insert("protoc".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_readme_summary(source_path: &Utf8Path) -> Result<Option<String>, RepoctlError> {
+    let path = source_path.join("README.md");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path).map_err(|source| RepoctlError::io(path, source))?;
+    Ok(content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.trim_start_matches('#').trim().to_string()))
+}
+
+fn is_primary_manifest(name: &str) -> bool {
+    matches!(
+        name,
+        "Cargo.toml"
+            | "Cargo.lock"
+            | "rust-toolchain.toml"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lock"
+            | "Pulumi.yaml"
+            | "operon.yaml"
+            | "Makefile"
+            | "project.yaml"
+            | "project.yml"
+    )
+}
+
+fn collect_cargo_dependencies(
+    path: &Utf8Path,
+    dependencies: &mut BTreeSet<String>,
+    tools: &mut BTreeSet<String>,
+) -> Result<(), RepoctlError> {
+    let content =
+        fs::read_to_string(path).map_err(|source| RepoctlError::io(path.to_path_buf(), source))?;
+    let Ok(document) = content.parse::<DocumentMut>() else {
+        return Ok(());
+    };
+    for table_name in [
+        "dependencies",
+        "dev-dependencies",
+        "build-dependencies",
+        "workspace.dependencies",
+    ] {
+        collect_toml_dependency_table(&document, table_name, dependencies);
+    }
+    if content.contains("prost-build") {
+        tools.insert("protoc".to_string());
+    }
+    Ok(())
+}
+
+fn collect_toml_dependency_table(
+    document: &DocumentMut,
+    table_name: &str,
+    dependencies: &mut BTreeSet<String>,
+) {
+    let Some(table) =
+        dotted_toml_item(document.as_item(), table_name).and_then(Item::as_table_like)
+    else {
+        return;
+    };
+    for (name, item) in table.iter() {
+        if name.starts_with("@cellis") || name == "operon" || item.to_string().contains("chromatin")
+        {
+            dependencies.insert(name.to_string());
+        }
+    }
+}
+
+fn dotted_toml_item<'a>(item: &'a Item, path: &str) -> Option<&'a Item> {
+    let mut current = item;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+fn collect_package_json_dependencies(
+    path: &Utf8Path,
+    dependencies: &mut BTreeSet<String>,
+    tools: &mut BTreeSet<String>,
+) -> Result<(), RepoctlError> {
+    let content =
+        fs::read_to_string(path).map_err(|source| RepoctlError::io(path.to_path_buf(), source))?;
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return Ok(());
+    };
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(object) = value.get(section).and_then(Value::as_object) {
+            for key in object.keys() {
+                if key.starts_with("@cellis/") || key == "operon" {
+                    dependencies.insert(key.clone());
+                }
+            }
+        }
+    }
+    if let Some(scripts) = value.get("scripts").and_then(Value::as_object) {
+        for command in scripts.values().filter_map(Value::as_str) {
+            if command.contains("pulumi") {
+                tools.insert("pulumi".to_string());
+            }
+            if command.contains("buf") {
+                tools.insert("buf".to_string());
+            }
+        }
+    }
+    tools.insert("node".to_string());
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct PlacementDecision {
+    destination: RepoRelativePath,
+    kind: ProjectKind,
+    confidence: f32,
+    reasons: Vec<String>,
+    override_applied: bool,
+}
+
+fn infer_placement(
+    name: &str,
+    inventory: &SourceInventory,
+    override_path: Option<RepoRelativePath>,
+    override_kind: Option<ProjectKind>,
+) -> PlacementDecision {
+    if let Some(destination) = override_path {
+        let kind = override_kind.unwrap_or_else(|| kind_from_destination(&destination));
+        return PlacementDecision {
+            destination,
+            kind,
+            confidence: 1.0,
+            reasons: vec!["explicit placement override".to_string()],
+            override_applied: true,
+        };
+    }
+    let text = format!(
+        "{} {} {} {}",
+        name,
+        inventory.readme_summary.clone().unwrap_or_default(),
+        inventory.top_level_dirs.join(" "),
+        inventory.dependency_references.join(" ")
+    )
+    .to_lowercase();
+    let (lane, kind, confidence, reason) = if text.contains("tool")
+        || text.contains("skill")
+        || text.contains("generator")
+        || name == "skills"
+    {
+        (
+            "tools",
+            ProjectKind::Tool,
+            0.88,
+            "developer tooling indicators",
+        )
+    } else if text.contains("nucleus")
+        || text.contains("membrane")
+        || text.contains("eks")
+        || text.contains("iam")
+        || text.contains("network")
+        || inventory.manifests.iter().any(|path| path == "Pulumi.yaml")
+            && !inventory.manifests.iter().any(|path| path == "Cargo.toml")
+    {
+        (
+            "core-infra",
+            ProjectKind::CoreInfraComponent,
+            0.86,
+            "platform infrastructure indicators",
+        )
+    } else if text.contains("framework")
+        || text.contains("sdk")
+        || text.contains("runtime")
+        || name == "operon"
+    {
+        (
+            "frameworks",
+            ProjectKind::Framework,
+            0.90,
+            "reusable framework indicators",
+        )
+    } else if text.contains("identity")
+        || text.contains("registry")
+        || text.contains("billing")
+        || text.contains("auth")
+        || matches!(name, "atp" | "chromatin" | "ligand")
+    {
+        (
+            "foundations",
+            ProjectKind::FoundationService,
+            0.84,
+            "foundation service indicators",
+        )
+    } else {
+        (
+            "apps",
+            ProjectKind::App,
+            0.78,
+            "default product application lane",
+        )
+    };
+    let kind = override_kind.unwrap_or(kind);
+    PlacementDecision {
+        destination: RepoRelativePath::new(format!("{lane}/{name}"))
+            .unwrap_or_else(|_| RepoRelativePath::root()),
+        kind,
+        confidence,
+        reasons: vec![reason.to_string()],
+        override_applied: false,
+    }
+}
+
+fn kind_from_destination(destination: &RepoRelativePath) -> ProjectKind {
+    let path = destination.as_str();
+    if path.starts_with("frameworks/") {
+        ProjectKind::Framework
+    } else if path.starts_with("foundations/") {
+        ProjectKind::FoundationService
+    } else if path.starts_with("core-infra/") {
+        ProjectKind::CoreInfraComponent
+    } else if path.starts_with("tools/") {
+        ProjectKind::Tool
+    } else {
+        ProjectKind::App
+    }
+}
+
+fn synthesize_project_manifest(
+    name: &str,
+    placement: &PlacementDecision,
+    inventory: &SourceInventory,
+    owner: Option<&OwnerHandle>,
+) -> Result<String, RepoctlError> {
+    let project = project_name_for_destination(&placement.destination, &placement.kind)?;
+    let owner = owner.map_or("@platform", OwnerHandle::as_str);
+    let mut output = format!(
+        "schema: company.project/v1\nname: {project}\nkind: {}\npath: {}\nowners:\n  - \
+         \"{owner}\"\n",
+        project_kind_manifest_name(&placement.kind),
+        placement.destination,
+    );
+    let workspaces = synthesize_workspaces(inventory);
+    if !workspaces.is_empty() {
+        output.push_str("\nworkspaces:\n");
+        for workspace in &workspaces {
+            output.push_str(workspace);
+        }
+    }
+    let tasks = synthesize_tasks(inventory, &workspaces);
+    if !tasks.is_empty() {
+        output.push_str("\ntasks:\n");
+        output.push_str(&tasks);
+    }
+    if let Some(iac) = synthesize_iac(inventory)? {
+        output.push('\n');
+        output.push_str(&iac);
+    }
+    if inventory.top_level_dirs.iter().any(|dir| dir == "docs") {
+        output.push_str("\nai:\n  docs:\n    - docs\n");
+    }
+    if placement.kind == ProjectKind::Tool && workspaces.is_empty() {
+        output.push_str("\n# docs/spec-only tool; tasks intentionally omitted\n");
+    }
+    let _ = name;
+    Ok(output)
+}
+
+fn project_kind_manifest_name(kind: &ProjectKind) -> &'static str {
+    match kind {
+        ProjectKind::App => "app",
+        ProjectKind::Framework => "framework",
+        ProjectKind::FoundationService => "foundation-service",
+        ProjectKind::ProtoRoot => "proto-root",
+        ProjectKind::CoreInfra => "core-infra",
+        ProjectKind::CoreInfraComponent => "core-infra-component",
+        ProjectKind::Tool => "tool",
+    }
+}
+
+fn project_name_for_destination(
+    destination: &RepoRelativePath,
+    kind: &ProjectKind,
+) -> Result<ProjectName, RepoctlError> {
+    let path = destination.as_str();
+    let slug = path.rsplit('/').next().ok_or_else(|| {
+        RepoctlError::diagnostic(Diagnostic::error(
+            "adoption.project.name",
+            "destination path must include a project slug",
+        ))
+    })?;
+    let name = match kind {
+        ProjectKind::App => format!("apps.{slug}"),
+        ProjectKind::Framework => format!("frameworks.{slug}"),
+        ProjectKind::FoundationService => format!("foundations.{slug}"),
+        ProjectKind::CoreInfraComponent => format!("core-infra.{slug}"),
+        ProjectKind::Tool => format!("tools.{slug}"),
+        ProjectKind::ProtoRoot => "protos.shared".to_string(),
+        ProjectKind::CoreInfra => "core-infra".to_string(),
+    };
+    ProjectName::new(name).map_err(RepoctlError::diagnostic)
+}
+
+fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
+    let mut workspaces = Vec::new();
+    if inventory.manifests.iter().any(|path| path == "Cargo.toml") {
+        let is_workspace = inventory
+            .manifests
+            .iter()
+            .any(|path| path.starts_with("crates/") || path.starts_with("apps/"));
+        let command = if is_workspace { "rust" } else { "service" };
+        workspaces.push(format!(
+            "  - name: {command}\n    language: rust\n    toolchain: cargo\n    root: .\n    \
+             manifest: Cargo.toml\n{}    target_dir: \"{{repo_root}}/target/rust\"\n",
+            if inventory.manifests.iter().any(|path| path == "Cargo.lock") {
+                "    lockfile: Cargo.lock\n"
+            } else {
+                ""
+            },
+        ));
+    }
+    for manifest in inventory
+        .manifests
+        .iter()
+        .filter(|path| path.ends_with("package.json"))
+    {
+        let root = manifest.strip_suffix("/package.json").unwrap_or(".");
+        let root = if root.is_empty() { "." } else { root };
+        let name = node_workspace_name(root);
+        let (toolchain, lockfile, cache_dir) = node_toolchain(inventory, root);
+        workspaces.push(format!(
+            "  - name: {name}\n    language: typescript\n    toolchain: {toolchain}\n    root: \
+             {root}\n    manifest: {manifest}\n{lockfile}    cache_dir: \
+             \"{{repo_root}}/{cache_dir}\"\n",
+        ));
+    }
+    if inventory.manifests.iter().any(|path| path == "Pulumi.yaml") {
+        workspaces.push(
+            "  - name: infra\n    language: iac\n    root: .\n    manifest: Pulumi.yaml\n"
+                .to_string(),
+        );
+    }
+    workspaces
+}
+
+fn node_workspace_name(root: &str) -> String {
+    match root {
+        "infra" => "infra".to_string(),
+        "." | "frontend" => "frontend".to_string(),
+        value if value.contains("client") => "client-ts".to_string(),
+        value => value.replace('/', "-"),
+    }
+}
+
+fn node_toolchain(inventory: &SourceInventory, root: &str) -> (&'static str, String, &'static str) {
+    let prefix = if root == "." { "" } else { root };
+    let lock_path = |name: &str| {
+        if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        }
+    };
+    if inventory.manifests.contains(&lock_path("pnpm-lock.yaml")) {
+        (
+            "pnpm",
+            format!("    lockfile: {}\n", lock_path("pnpm-lock.yaml")),
+            "target/pnpm",
+        )
+    } else if inventory.manifests.contains(&lock_path("yarn.lock")) {
+        (
+            "yarn",
+            format!("    lockfile: {}\n", lock_path("yarn.lock")),
+            "target/yarn",
+        )
+    } else if inventory.manifests.contains(&lock_path("bun.lock")) {
+        (
+            "bun",
+            format!("    lockfile: {}\n", lock_path("bun.lock")),
+            "target/bun",
+        )
+    } else {
+        (
+            "npm",
+            format!("    lockfile: {}\n", lock_path("package-lock.json")),
+            "target/npm",
+        )
+    }
+}
+
+fn synthesize_tasks(inventory: &SourceInventory, workspaces: &[String]) -> String {
+    let mut tasks = String::new();
+    if workspaces
+        .iter()
+        .any(|workspace| workspace.contains("language: rust"))
+    {
+        tasks.push_str("  check:\n    - workspace: service\n      command: cargo check\n");
+        tasks.push_str("  test:\n    - workspace: service\n      command: cargo test\n");
+        tasks.push_str("  build:\n    - workspace: service\n      command: cargo build\n");
+    }
+    if workspaces
+        .iter()
+        .any(|workspace| workspace.contains("language: typescript"))
+    {
+        let workspace = if inventory
+            .manifests
+            .iter()
+            .any(|path| path.starts_with("infra/package.json"))
+        {
+            "infra"
+        } else {
+            "frontend"
+        };
+        let _ = write!(
+            tasks,
+            "  check:\n    - workspace: {workspace}\n      command: npx tsc --noEmit\n"
+        );
+        let _ = write!(
+            tasks,
+            "  build:\n    - workspace: {workspace}\n      command: npm run build\n"
+        );
+    }
+    tasks
+}
+
+fn synthesize_iac(inventory: &SourceInventory) -> Result<Option<String>, RepoctlError> {
+    if !inventory
+        .manifests
+        .iter()
+        .any(|path| path == "Pulumi.yaml" || path == "infra/Pulumi.yaml")
+    {
+        return Ok(None);
+    }
+    let root = if inventory
+        .manifests
+        .iter()
+        .any(|path| path == "infra/Pulumi.yaml")
+    {
+        "infra"
+    } else {
+        "."
+    };
+    let stacks = inventory
+        .manifests
+        .iter()
+        .filter_map(|path| {
+            path.strip_prefix(&format!("{root}/Pulumi."))
+                .or_else(|| path.strip_prefix("Pulumi."))
+        })
+        .filter_map(|path| path.strip_suffix(".yaml"))
+        .collect::<Vec<_>>();
+    let mut output = format!("iac:\n  root: {root}\n  provider: pulumi\n");
+    if !stacks.is_empty() {
+        output.push_str("  stacks:\n");
+        for stack in stacks {
+            writeln!(output, "    - {stack}").map_err(|source| {
+                RepoctlError::Internal(format!("failed to render iac: {source}"))
+            })?;
+        }
+    }
+    Ok(Some(output))
+}
+
+fn copy_operations_for_source(
+    source_path: &Utf8Path,
+    destination: &RepoRelativePath,
+    dest_root: &Utf8Path,
+) -> Result<Vec<AdoptionFileOperation>, RepoctlError> {
+    let mut operations = Vec::new();
+    collect_copy_operations(
+        source_path,
+        source_path,
+        destination,
+        dest_root,
+        &mut operations,
+    )?;
+    Ok(operations)
+}
+
+fn collect_copy_operations(
+    root: &Utf8Path,
+    current: &Utf8Path,
+    destination: &RepoRelativePath,
+    dest_root: &Utf8Path,
+    operations: &mut Vec<AdoptionFileOperation>,
+) -> Result<(), RepoctlError> {
+    for entry in
+        fs::read_dir(current).map_err(|source| RepoctlError::io(current.to_path_buf(), source))?
+    {
+        let entry = entry.map_err(|source| RepoctlError::io(current.to_path_buf(), source))?;
+        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "path.non_utf8",
+                format!("path is not valid UTF-8: {}", path.display()),
+            ))
+        })?;
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        if matches!(name, "project.yaml" | "project.yml") {
+            continue;
+        }
+        if path.is_dir() && ADOPTION_EXCLUDED_DIRS.contains(&name) {
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|_| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.copy.path",
+                "source path escaped source root",
+            ))
+        })?;
+        let relative_project_path = ProjectRelativePath::new(relative.as_str().to_string())
+            .map_err(RepoctlError::diagnostic)?;
+        let destination_path = destination
+            .join_project(&relative_project_path)
+            .map_err(RepoctlError::diagnostic)?;
+        if path.is_dir() {
+            collect_copy_operations(root, &path, destination, dest_root, operations)?;
+        } else if path.is_symlink() {
+            operations.push(AdoptionFileOperation {
+                id: format!("adoption.copy.reject_symlink.{destination_path}"),
+                operation: "reject-symlink".to_string(),
+                source_path: Some(path),
+                destination_path,
+                content: None,
+                checksum: None,
+            });
+        } else {
+            let target = dest_root.join(destination_path.as_str());
+            if target.exists() {
+                return Err(RepoctlError::diagnostic(
+                    Diagnostic::error(
+                        "adoption.copy.conflict",
+                        format!("destination `{destination_path}` already exists"),
+                    )
+                    .with_path(destination_path.as_str()),
+                ));
+            }
+            operations.push(AdoptionFileOperation {
+                id: format!("adoption.copy.{destination_path}"),
+                operation: "copy-file".to_string(),
+                source_path: Some(path),
+                destination_path,
+                content: None,
+                checksum: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct PackageIndex {
+    rust: BTreeMap<String, RepoRelativePath>,
+    node: BTreeMap<String, RepoRelativePath>,
+}
+
+fn build_adopted_package_index(sources: &[AdoptedSource]) -> Result<PackageIndex, RepoctlError> {
+    let mut index = PackageIndex::default();
+    for source in sources.iter().filter(|source| !source.skipped) {
+        collect_package_index(
+            &source.source_path,
+            &source.source_path,
+            &source.destination_path,
+            &mut index,
+        )?;
+    }
+    Ok(index)
+}
+
+fn collect_package_index(
+    root: &Utf8Path,
+    current: &Utf8Path,
+    destination: &RepoRelativePath,
+    index: &mut PackageIndex,
+) -> Result<(), RepoctlError> {
+    for entry in
+        fs::read_dir(current).map_err(|source| RepoctlError::io(current.to_path_buf(), source))?
+    {
+        let entry = entry.map_err(|source| RepoctlError::io(current.to_path_buf(), source))?;
+        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "path.non_utf8",
+                format!("path is not valid UTF-8: {}", path.display()),
+            ))
+        })?;
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        if path.is_dir() {
+            if ADOPTION_EXCLUDED_DIRS.contains(&name) {
+                continue;
+            }
+            collect_package_index(root, &path, destination, index)?;
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|_| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.package.path",
+                "package path escaped source root",
+            ))
+        })?;
+        let package_root = relative
+            .parent()
+            .filter(|path| !path.as_str().is_empty())
+            .unwrap_or_else(|| Utf8Path::new("."));
+        let package_root = ProjectRelativePath::new(package_root.as_str().to_string())
+            .map_err(RepoctlError::diagnostic)?;
+        let dest_package_root = destination
+            .join_project(&package_root)
+            .map_err(RepoctlError::diagnostic)?;
+        if name == "Cargo.toml" {
+            if let Some(package) = cargo_package_name(&path)? {
+                index.rust.insert(package, dest_package_root);
+            }
+        } else if name == "package.json"
+            && let Some(package) = node_package_name(&path)?
+        {
+            index.node.insert(package, dest_package_root);
+        }
+    }
+    Ok(())
+}
+
+fn cargo_package_name(path: &Utf8Path) -> Result<Option<String>, RepoctlError> {
+    let content =
+        fs::read_to_string(path).map_err(|source| RepoctlError::io(path.to_path_buf(), source))?;
+    let Ok(document) = content.parse::<DocumentMut>() else {
+        return Ok(None);
+    };
+    Ok(document
+        .get("package")
+        .and_then(|item| item.get("name"))
+        .and_then(Item::as_str)
+        .map(ToString::to_string))
+}
+
+fn node_package_name(path: &Utf8Path) -> Result<Option<String>, RepoctlError> {
+    let content =
+        fs::read_to_string(path).map_err(|source| RepoctlError::io(path.to_path_buf(), source))?;
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return Ok(None);
+    };
+    Ok(value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string))
+}
+
+fn plan_dependency_rewrites(
+    sources: &[AdoptedSource],
+    index: &PackageIndex,
+) -> Result<Vec<DependencyRewrite>, RepoctlError> {
+    let mut rewrites = Vec::new();
+    for source in sources.iter().filter(|source| !source.skipped) {
+        for manifest in &source.inventory.manifests {
+            let file = source
+                .destination_path
+                .join_project(
+                    &ProjectRelativePath::new(manifest.clone())
+                        .map_err(RepoctlError::diagnostic)?,
+                )
+                .map_err(RepoctlError::diagnostic)?;
+            if manifest.ends_with("Cargo.toml") {
+                for package in &source.inventory.dependency_references {
+                    if let Some(target) = index.rust.get(package) {
+                        rewrites.push(DependencyRewrite {
+                            file: file.clone(),
+                            package: package.clone(),
+                            from: "registry/git".to_string(),
+                            to: relative_dependency_path(&file, target),
+                            surface: DependencySurface::FrameworkFacade,
+                            owner_project: project_name_for_destination(
+                                &source.destination_path,
+                                &source.inferred_kind,
+                            )?,
+                        });
+                    }
+                }
+            } else if manifest.ends_with("package.json") {
+                for package in &source.inventory.dependency_references {
+                    if let Some(target) = index.node.get(package) {
+                        rewrites.push(DependencyRewrite {
+                            file: file.clone(),
+                            package: package.clone(),
+                            from: "registry/git".to_string(),
+                            to: format!("file:{}", relative_dependency_path(&file, target)),
+                            surface: DependencySurface::FrameworkFacade,
+                            owner_project: project_name_for_destination(
+                                &source.destination_path,
+                                &source.inferred_kind,
+                            )?,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    rewrites.sort_by(|left, right| (&left.file, &left.package).cmp(&(&right.file, &right.package)));
+    rewrites.dedup_by(|left, right| left.file == right.file && left.package == right.package);
+    Ok(rewrites)
+}
+
+fn apply_rewrites_to_operations(
+    operations: &mut [AdoptionFileOperation],
+    rewrites: &[DependencyRewrite],
+) -> Result<(), RepoctlError> {
+    let mut by_file: BTreeMap<RepoRelativePath, Vec<&DependencyRewrite>> = BTreeMap::new();
+    for rewrite in rewrites {
+        by_file
+            .entry(rewrite.file.clone())
+            .or_default()
+            .push(rewrite);
+    }
+    for (file, file_rewrites) in by_file {
+        let Some(operation) = operations
+            .iter_mut()
+            .find(|operation| operation.destination_path == file)
+        else {
+            continue;
+        };
+        let Some(source_path) = &operation.source_path else {
+            continue;
+        };
+        let content = fs::read_to_string(source_path)
+            .map_err(|source| RepoctlError::io(source_path.clone(), source))?;
+        let rewritten = if file.as_str().ends_with("Cargo.toml") {
+            rewrite_cargo_manifest(&content, &file_rewrites)?
+        } else if file.as_str().ends_with("package.json") {
+            rewrite_package_json(&content, &file_rewrites)?
+        } else {
+            content
+        };
+        operation.content = Some(rewritten);
+    }
+    Ok(())
+}
+
+fn rewrite_cargo_manifest(
+    content: &str,
+    rewrites: &[&DependencyRewrite],
+) -> Result<String, RepoctlError> {
+    let mut document = content.parse::<DocumentMut>().map_err(|source| {
+        RepoctlError::diagnostic(Diagnostic::error(
+            "adoption.dependency.rewrite",
+            format!("failed to parse Cargo manifest: {source}"),
+        ))
+    })?;
+    for table_name in [
+        "dependencies",
+        "dev-dependencies",
+        "build-dependencies",
+        "workspace.dependencies",
+    ] {
+        rewrite_cargo_table(&mut document, table_name, rewrites);
+    }
+    Ok(document.to_string())
+}
+
+fn rewrite_cargo_table(
+    document: &mut DocumentMut,
+    table_name: &str,
+    rewrites: &[&DependencyRewrite],
+) {
+    let Some(table) =
+        dotted_toml_item_mut(document.as_item_mut(), table_name).and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    for rewrite in rewrites {
+        if table.contains_key(&rewrite.package) {
+            table.insert(&rewrite.package, cargo_path_dependency(&rewrite.to));
+        }
+    }
+}
+
+fn cargo_path_dependency(path: &str) -> Item {
+    let mut table = InlineTable::default();
+    let Ok(path_value) = value(path.to_string()).into_value() else {
+        return value(path.to_string());
+    };
+    table.insert("path", path_value);
+    Item::Value(TomlValue::InlineTable(table))
+}
+
+fn dotted_toml_item_mut<'a>(item: &'a mut Item, path: &str) -> Option<&'a mut Item> {
+    let mut current = item;
+    for part in path.split('.') {
+        current = current.get_mut(part)?;
+    }
+    Some(current)
+}
+
+fn rewrite_package_json(
+    content: &str,
+    rewrites: &[&DependencyRewrite],
+) -> Result<String, RepoctlError> {
+    let mut value = serde_json::from_str::<Value>(content).map_err(|source| {
+        RepoctlError::diagnostic(Diagnostic::error(
+            "adoption.dependency.rewrite",
+            format!("failed to parse package.json: {source}"),
+        ))
+    })?;
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        let Some(object) = value.get_mut(section).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for rewrite in rewrites {
+            if object.contains_key(&rewrite.package) {
+                object.insert(rewrite.package.clone(), Value::String(rewrite.to.clone()));
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value)
+        .map(|mut output| {
+            output.push('\n');
+            output
+        })
+        .map_err(|source| {
+            RepoctlError::Internal(format!("failed to render rewritten package.json: {source}"))
+        })
+}
+
+fn relative_dependency_path(from_file: &RepoRelativePath, target: &RepoRelativePath) -> String {
+    let from_parent = from_file
+        .as_str()
+        .rsplit_once('/')
+        .map_or(".", |(parent, _)| parent);
+    let from_parts = from_parent
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>();
+    let target_parts = target
+        .as_str()
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>();
+    let common = from_parts
+        .iter()
+        .zip(target_parts.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = Vec::new();
+    for _ in common..from_parts.len() {
+        parts.push("..".to_string());
+    }
+    parts.extend(
+        target_parts[common..]
+            .iter()
+            .map(|part| (*part).to_string()),
+    );
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn adoption_verification_plan(
+    dest_root: &Utf8Path,
+    mode: ValidationMode,
+    sources: &[AdoptedSource],
+) -> VerificationPlan {
+    let mut prerequisites = BTreeMap::new();
+    for source in sources.iter().filter(|source| !source.skipped) {
+        for tool in &source.inventory.required_tools {
+            prerequisites.insert(
+                tool.clone(),
+                ToolPrerequisite {
+                    tool: tool.clone(),
+                    reason: format!("required by adopted source `{}`", source.name),
+                },
+            );
+        }
+    }
+    let repo = RepoRelativePath::root();
+    let mut commands = vec![
+        process_command(
+            dest_root,
+            &repo,
+            "repoctl",
+            ["graph", "validate", "--mode", "structural"],
+        ),
+        process_command(dest_root, &repo, "repoctl", ["hygiene", "check"]),
+    ];
+    if matches!(mode, ValidationMode::Metadata | ValidationMode::Full) {
+        commands.push(process_command(
+            dest_root,
+            &repo,
+            "repoctl",
+            ["graph", "validate", "--mode", "metadata"],
+        ));
+    }
+    if mode == ValidationMode::Full {
+        for source in sources.iter().filter(|source| !source.skipped) {
+            if source
+                .inventory
+                .manifests
+                .iter()
+                .any(|path| path.ends_with("Cargo.toml"))
+            {
+                commands.push(process_command(
+                    dest_root,
+                    &source.destination_path,
+                    "cargo",
+                    ["check", "--workspace", "--all-features"],
+                ));
+            }
+            if source
+                .inventory
+                .manifests
+                .iter()
+                .any(|path| path.ends_with("package.json"))
+            {
+                commands.push(process_command(
+                    dest_root,
+                    &source.destination_path,
+                    "npm",
+                    ["run", "build"],
+                ));
+            }
+        }
+    }
+    VerificationPlan {
+        prerequisites: prerequisites.into_values().collect(),
+        commands,
+    }
+}
+
+fn process_command<const N: usize>(
+    root: &Utf8Path,
+    cwd: &RepoRelativePath,
+    program: &str,
+    args: [&str; N],
+) -> ProcessCommand {
+    ProcessCommand {
+        cwd: cwd.clone(),
+        absolute_cwd: Some(root.join(cwd.as_str()).as_std_path().to_path_buf()),
+        program: program.to_string(),
+        args: args.into_iter().map(ToString::to_string).collect(),
+        ..ProcessCommand::default()
+    }
+}
+
+fn write_utf8_file(
+    root: &Path,
+    path: &RepoRelativePath,
+    content: &str,
+) -> Result<(), RepoctlError> {
+    let target = root.join(path.as_str());
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|source| RepoctlError::io(parent.display().to_string(), source))?;
+    }
+    fs::write(&target, content)
+        .map_err(|source| RepoctlError::io(target.display().to_string(), source))
+}
+
+fn hygiene_report(root: &Path, cleanable: bool) -> Result<HygieneReport, RepoctlError> {
+    let mut diagnostics = Vec::new();
+    let mut operations = Vec::new();
+    collect_hygiene(root, root, cleanable, &mut diagnostics, &mut operations)?;
+    Ok(HygieneReport {
+        diagnostics,
+        operations,
+    })
+}
+
+fn collect_hygiene(
+    root: &Path,
+    current: &Path,
+    cleanable: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+    operations: &mut Vec<FileOperation>,
+) -> Result<(), RepoctlError> {
+    for entry in fs::read_dir(current)
+        .map_err(|source| RepoctlError::io(current.display().to_string(), source))?
+    {
+        let entry =
+            entry.map_err(|source| RepoctlError::io(current.display().to_string(), source))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let rel = path.strip_prefix(root).map_err(|_| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "hygiene.path",
+                "hygiene path escaped repo root",
+            ))
+        })?;
+        let rel_text = rel.to_string_lossy().replace('\\', "/");
+        let nested_root = !rel_text.is_empty();
+        if path.is_dir() && HYGIENE_GENERATED_DIRS.contains(&name) && nested_root {
+            if name == ".github" && rel_text == ".github" {
+                collect_hygiene(root, &path, cleanable, diagnostics, operations)?;
+                continue;
+            }
+            diagnostics.push(
+                Diagnostic::warning(
+                    "adoption.hygiene.generated_artifact",
+                    format!("generated or repository metadata directory `{rel_text}` is present"),
+                )
+                .with_path(&rel_text),
+            );
+            if cleanable && name != ".github" && name != ".git" {
+                operations.push(FileOperation {
+                    path: RepoRelativePath::new(rel_text.clone())
+                        .map_err(RepoctlError::diagnostic)?,
+                    operation: "remove-generated".to_string(),
+                    content: None,
+                });
+            }
+            continue;
+        }
+        if path.is_dir() {
+            collect_hygiene(root, &path, cleanable, diagnostics, operations)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_github_actions_workflow(snapshot: &RepoSnapshot) -> Result<String, RepoctlError> {
+    let jobs = WorkflowJobs::from_snapshot(snapshot);
+    let mut workflow = String::from(
+        r#"# Generated by repoctl. Refresh with: repoctl ci workflow --provider github-actions --write
+name: repoctl
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  graph:
+    name: graph
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install repoctl
+        run: cargo install --path apps/repoctl-cli --locked
+      - name: Validate graph
+        run: repoctl graph validate --mode structural
+      - id: matrix
+        name: Compute matrix
+        run: |
+          matrix=$(repoctl ci matrix --tasks check,test,build --fallback all --format github-actions)
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+"#,
+    );
+    append_rust_workflow_job(&mut workflow, jobs.has_rust);
+    append_node_workflow_job(&mut workflow, jobs.has_node);
+    append_iac_workflow_job(&mut workflow, jobs.has_iac);
+    append_required_workflow_job(&mut workflow, jobs)?;
+    Ok(workflow)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkflowJobs {
+    has_rust: bool,
+    has_node: bool,
+    has_iac: bool,
+}
+
+impl WorkflowJobs {
+    fn from_snapshot(snapshot: &RepoSnapshot) -> Self {
+        let has_rust = snapshot.projects.iter().any(|project| {
+            project
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.language == WorkspaceLanguage::Rust)
+        });
+        let has_node = snapshot.projects.iter().any(|project| {
+            project
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.language == WorkspaceLanguage::TypeScript)
+        });
+        let has_iac = snapshot
+            .projects
+            .iter()
+            .any(|project| project.iac.is_some());
+        Self {
+            has_rust,
+            has_node,
+            has_iac,
+        }
+    }
+}
+
+fn append_rust_workflow_job(workflow: &mut String, enabled: bool) {
+    if enabled {
+        workflow.push_str(
+            r"
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    needs: graph
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Run Rust checks
+        run: repoctl run check --dry-run --format human
+",
+        );
+    }
+}
+
+fn append_node_workflow_job(workflow: &mut String, enabled: bool) {
+    if enabled {
+        workflow.push_str(
+            r#"
+  node:
+    name: node
+    runs-on: ubuntu-latest
+    needs: graph
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run Node checks
+        run: repoctl run check --dry-run --format human
+"#,
+        );
+    }
+}
+
+fn append_iac_workflow_job(workflow: &mut String, enabled: bool) {
+    if enabled {
+        workflow.push_str(
+            r"
+  iac:
+    name: iac
+    runs-on: ubuntu-latest
+    needs: graph
+    steps:
+      - uses: actions/checkout@v4
+      - name: Type-check IaC plans
+        run: repoctl iac plan --affected --dry-run
+",
+        );
+    }
+}
+
+fn append_required_workflow_job(
+    workflow: &mut String,
+    jobs: WorkflowJobs,
+) -> Result<(), RepoctlError> {
+    let needs = [
+        "graph",
+        if jobs.has_rust { "rust" } else { "" },
+        if jobs.has_node { "node" } else { "" },
+        if jobs.has_iac { "iac" } else { "" },
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join(", ");
+    writeln!(
+        workflow,
+        r#"
+  required:
+    name: repoctl required
+    runs-on: ubuntu-latest
+    needs: [{needs}]
+    if: always()
+    steps:
+      - name: Check required jobs
+        run: |
+          if [ '${{{{ contains(toJson(needs), '"result":"failure"') }}}}' = 'true' ]; then
+            exit 1
+          fi
+"#
+    )
+    .map_err(|source| RepoctlError::Internal(format!("failed to render workflow: {source}")))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // Facade tests build temporary repositories synchronously before invoking sync services.
@@ -291,9 +2106,11 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        AiContextRequest, CodegenCheckRequest, DiscoverRequest, GraphValidateRequest,
-        IacFacadeRequest, PrSummaryRequest, ProjectName, ProtoFacadeRequest, ProtoOperation,
-        RepoRelativePath, Repoctl, TemplateListRequest, TemplateRenderRequest, TemplateSource,
+        AdoptionApplyRequest, AdoptionCiMode, AdoptionOutputFormat, AdoptionPlanRequest,
+        AiContextRequest, CodegenCheckRequest, DependencyRewriteMode, DiscoverRequest,
+        GraphValidateRequest, HygieneCheckRequest, IacFacadeRequest, PrSummaryRequest, ProjectName,
+        ProtoFacadeRequest, ProtoOperation, RepoRelativePath, Repoctl, TemplateListRequest,
+        TemplateRenderRequest, TemplateSource, ValidationMode,
     };
 
     #[test]
@@ -318,6 +2135,7 @@ mod tests {
             .validate_graph(GraphValidateRequest {
                 repo: Some(temp.path().to_path_buf()),
                 changed_files: Vec::new(),
+                mode: ValidationMode::Structural,
             })
             .expect("validation report");
         assert!(
@@ -326,6 +2144,75 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code.as_ref() == "policy.cross_app_dependency")
         );
+    }
+
+    #[test]
+    fn test_should_plan_apply_validate_and_check_hygiene_for_adoption() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let dest = temp.path().join("dest");
+        write_adoption_fixture(&source, &dest);
+        let facade = Repoctl::with_default_adapters().expect("facade");
+
+        let plan = facade
+            .adopt_plan(AdoptionPlanRequest {
+                source: source.clone(),
+                dest: dest.clone(),
+                exclude: vec!["synapse".to_string()],
+                rewrite_deps: DependencyRewriteMode::Auto,
+                ci: AdoptionCiMode::Update,
+                verification: ValidationMode::Metadata,
+                format: AdoptionOutputFormat::Json,
+                ..AdoptionPlanRequest::default()
+            })
+            .expect("adoption plan");
+        assert!(
+            plan.sources
+                .iter()
+                .any(|source| source.name == "synapse" && source.skipped)
+        );
+        assert!(plan.sources.iter().any(|source| {
+            source.name == "operon" && source.destination_path.as_str() == "frameworks/operon"
+        }));
+        assert!(
+            plan.dependency_rewrites
+                .iter()
+                .any(|rewrite| rewrite.package == "operon")
+        );
+
+        let plan_path = temp.path().join("plan.json");
+        fs::write(
+            &plan_path,
+            serde_json::to_vec_pretty(&plan).expect("serialize plan"),
+        )
+        .expect("write plan");
+        facade
+            .adopt_apply(AdoptionApplyRequest {
+                plan: plan_path,
+                refresh: false,
+            })
+            .expect("apply plan");
+
+        assert!(dest.join("frameworks/operon/project.yaml").is_file());
+        assert!(dest.join("apps/golgi/project.yaml").is_file());
+        assert!(!dest.join("synapse").exists());
+        assert!(!dest.join("apps/golgi/.git").exists());
+        assert!(!dest.join("apps/golgi/node_modules").exists());
+        let cargo = fs::read_to_string(dest.join("apps/golgi/Cargo.toml")).expect("read cargo");
+        assert!(cargo.contains("path = \"../../frameworks/operon\""));
+
+        let validation = facade
+            .validate_graph(GraphValidateRequest {
+                repo: Some(dest.clone()),
+                changed_files: Vec::new(),
+                mode: ValidationMode::Structural,
+            })
+            .expect("validate adopted dest");
+        assert!(validation.is_success());
+        let hygiene = facade
+            .hygiene_check(HygieneCheckRequest { repo: Some(dest) })
+            .expect("hygiene");
+        assert!(hygiene.diagnostics.is_empty());
     }
 
     #[test]
@@ -586,5 +2473,66 @@ protos:
 "#,
         )
         .expect("identity manifest");
+    }
+
+    fn write_adoption_fixture(source: &Path, dest: &Path) {
+        fs::create_dir_all(source).expect("source dir");
+        fs::create_dir_all(dest.join("apps")).expect("dest apps");
+        fs::create_dir_all(dest.join("frameworks")).expect("dest frameworks");
+        fs::create_dir_all(dest.join("foundations")).expect("dest foundations");
+        fs::create_dir_all(dest.join("core-infra")).expect("dest core");
+        fs::create_dir_all(dest.join("tools")).expect("dest tools");
+        fs::write(
+            dest.join("repo.yaml"),
+            r#"
+schema: company.repo/v1
+name: universe
+layout: functional
+defaults:
+  owner: "@platform"
+"#,
+        )
+        .expect("dest repo");
+
+        fs::create_dir_all(source.join("operon/.git")).expect("operon git");
+        fs::create_dir_all(source.join("operon/.github/workflows")).expect("operon github");
+        fs::write(
+            source.join("operon/README.md"),
+            "# Operon\nReusable serverless framework and SDK.\n",
+        )
+        .expect("operon readme");
+        fs::write(
+            source.join("operon/Cargo.toml"),
+            r#"[package]
+name = "operon"
+version = "0.1.0"
+edition = "2024"
+"#,
+        )
+        .expect("operon cargo");
+
+        fs::create_dir_all(source.join("golgi/.git")).expect("golgi git");
+        fs::create_dir_all(source.join("golgi/node_modules")).expect("golgi node_modules");
+        fs::write(source.join("golgi/node_modules/generated.txt"), "generated").expect("generated");
+        fs::write(source.join("golgi/README.md"), "# Golgi\nProduct app.\n").expect("golgi readme");
+        fs::write(
+            source.join("golgi/Cargo.toml"),
+            r#"[package]
+name = "golgi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+operon = { version = "0.1.0", registry = "chromatin" }
+"#,
+        )
+        .expect("golgi cargo");
+
+        fs::create_dir_all(source.join("synapse")).expect("synapse");
+        fs::write(
+            source.join("synapse/README.md"),
+            "# Synapse\nSkip this repo.\n",
+        )
+        .expect("synapse readme");
     }
 }

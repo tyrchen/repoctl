@@ -12,11 +12,14 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+camino.workspace = true
 repoctl-core.workspace = true
 repoctl-engine.workspace = true
 repoctl-runner.workspace = true
 repoctl-scaffold.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+toml_edit.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile = "3.27.0"

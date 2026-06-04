@@ -7,6 +7,7 @@
 //! repoctl command-line frontend.
 
 use std::{
+    collections::BTreeMap,
     fmt::Write as FmtWrite,
     io::{self, Write},
     num::NonZeroU32,
@@ -16,15 +17,18 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use repoctl::{
-    AffectedReport, AffectedRequest, AiContext, AiContextRequest, BoundaryLintRequest,
-    CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic,
+    AdoptionApplyRequest, AdoptionCiMode, AdoptionOutputFormat, AdoptionPlan, AdoptionPlanRequest,
+    AdoptionVerifyRequest, AffectedReport, AffectedRequest, AiContext, AiContextRequest,
+    BoundaryLintRequest, CiFallback, CiMatrixReport, CiMatrixRequest, CiProvider, CiWorkflowReport,
+    CiWorkflowRequest, CodegenCheckReport, CodegenCheckRequest, DependencyRewriteMode, Diagnostic,
     ExplainReport, ExplainRequest, FileOperation, GraphPrintReport, GraphPrintRequest,
-    GraphValidateRequest, IacFacadeReport, IacFacadeRequest, IacProvider, InitPlan, InitProfile,
-    InitRequest, NewProjectRequest, OwnerHandle, PrSummary, PrSummaryRequest, ProcessCommand,
-    ProjectKind, ProjectName, ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation,
-    ProtoPackageName, RenderPlan, RepoLayout, RepoName, RepoRelativePath, Repoctl, RepoctlError,
-    Severity, SkillsFacadeRequest, TaskName, TaskRunReport, TaskRunRequest, TemplateListReport,
-    TemplateListRequest, TemplateRenderRequest, TemplateSource, ValidationReport, WorkspaceName,
+    GraphValidateRequest, HygieneCheckRequest, HygieneCleanRequest, HygieneReport, IacFacadeReport,
+    IacFacadeRequest, IacProvider, InitPlan, InitProfile, InitRequest, NewProjectRequest,
+    OwnerHandle, PrSummary, PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName,
+    ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation, ProtoPackageName, RenderPlan,
+    RepoLayout, RepoName, RepoRelativePath, Repoctl, RepoctlError, Severity, SkillsFacadeRequest,
+    TaskName, TaskRunReport, TaskRunRequest, TemplateListReport, TemplateListRequest,
+    TemplateRenderRequest, TemplateSource, ValidationMode, ValidationReport, WorkspaceName,
 };
 
 mod interactive;
@@ -161,6 +165,16 @@ enum Command {
         #[command(subcommand)]
         command: CiCommand,
     },
+    /// Adopt existing repositories into a functional monorepo.
+    Adopt {
+        #[command(subcommand)]
+        command: AdoptCommand,
+    },
+    /// Check and clean generated artifact leakage.
+    Hygiene {
+        #[command(subcommand)]
+        command: HygieneCommand,
+    },
     /// List and render templates.
     Template {
         #[command(subcommand)]
@@ -215,6 +229,8 @@ enum NewCommand {
     Framework(NewProjectArgs),
     /// Create a foundation service project.
     Foundation(NewProjectArgs),
+    /// Create a tool project.
+    Tool(NewProjectArgs),
 }
 
 #[derive(Clone, Debug, Parser)]
@@ -258,6 +274,21 @@ struct NewProjectArgs {
 
 #[derive(Debug, Subcommand)]
 enum CiCommand {
+    /// Render a maintained workflow.
+    Workflow {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// CI provider.
+        #[arg(long, value_enum, default_value_t = CiProviderArg::GithubActions)]
+        provider: CiProviderArg,
+        /// Write the workflow file.
+        #[arg(long)]
+        write: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
     /// Build CI matrix.
     Matrix {
         /// Repository root or path inside the repo.
@@ -275,6 +306,30 @@ enum CiCommand {
         /// Head git ref.
         #[arg(long)]
         head: Option<String>,
+        /// Fallback when affected-file detection cannot select entries.
+        #[arg(long, value_enum, default_value_t = CiFallbackArg::None)]
+        fallback: CiFallbackArg,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Execute one CI matrix step locally.
+    RunStep {
+        /// Task name.
+        #[arg(long)]
+        task: String,
+        /// Project selector.
+        #[arg(long)]
+        project: String,
+        /// Workspace selector.
+        #[arg(long)]
+        workspace: String,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Plan without running commands.
+        #[arg(long)]
+        dry_run: bool,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
@@ -284,6 +339,92 @@ enum CiCommand {
         /// Repository root or path inside the repo.
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdoptCommand {
+    /// Inspect sources and render a reviewed adoption plan.
+    Plan {
+        /// Directory containing source repos or a single source repo.
+        #[arg(long)]
+        source: PathBuf,
+        /// Destination initialized functional monorepo.
+        #[arg(long)]
+        dest: PathBuf,
+        /// Source repo names to include.
+        #[arg(long)]
+        include: Vec<String>,
+        /// Source repo names to exclude.
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Placement override SOURCE=DEST.
+        #[arg(long = "map")]
+        map: Vec<String>,
+        /// Kind override SOURCE=KIND.
+        #[arg(long = "kind")]
+        kind: Vec<String>,
+        /// Owner override SOURCE=@owner.
+        #[arg(long = "owner")]
+        owner: Vec<String>,
+        /// Dependency rewrite mode.
+        #[arg(long, value_enum, default_value_t = DependencyRewriteArg::Auto)]
+        rewrite_deps: DependencyRewriteArg,
+        /// CI behavior.
+        #[arg(long, value_enum, default_value_t = AdoptionCiArg::Update)]
+        ci: AdoptionCiArg,
+        /// Verification depth.
+        #[arg(long, value_enum, default_value_t = ValidationModeArg::Metadata)]
+        verification: ValidationModeArg,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Apply a reviewed adoption plan.
+    Apply {
+        /// Plan JSON file.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Refuse stale inference by requiring a fresh plan first.
+        #[arg(long)]
+        refresh: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Verify a reviewed adoption plan without copying.
+    Verify {
+        /// Plan JSON file.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HygieneCommand {
+    /// Check for generated artifacts and nested repository metadata.
+    Check {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Plan or clean generated artifacts.
+    Clean {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Plan without deleting generated artifacts.
+        #[arg(long)]
+        dry_run: bool,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
@@ -427,6 +568,9 @@ enum IacCommand {
         /// Plan core infrastructure.
         #[arg(long)]
         core: bool,
+        /// Plan without executing provider commands.
+        #[arg(long)]
+        dry_run: bool,
         /// Explicit changed file.
         #[arg(long = "changed-file")]
         changed_files: Vec<String>,
@@ -477,6 +621,9 @@ enum GraphCommand {
         /// Changed file used for path-based policies.
         #[arg(long = "changed-file")]
         changed_files: Vec<String>,
+        /// Validation depth.
+        #[arg(long, value_enum, default_value_t = ValidationModeArg::Structural)]
+        mode: ValidationModeArg,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
@@ -517,6 +664,39 @@ enum IacProviderArg {
     Opentofu,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ValidationModeArg {
+    Structural,
+    Metadata,
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CiFallbackArg {
+    All,
+    None,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CiProviderArg {
+    GithubActions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum DependencyRewriteArg {
+    Auto,
+    Off,
+    ReportOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum AdoptionCiArg {
+    Update,
+    Off,
+    ReportOnly,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -553,6 +733,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 NewCommand::App(args) => (ProjectKind::App, args),
                 NewCommand::Framework(args) => (ProjectKind::Framework, args),
                 NewCommand::Foundation(args) => (ProjectKind::FoundationService, args),
+                NewCommand::Tool(args) => (ProjectKind::Tool, args),
             };
             let format = args.format;
             let args = args.complete_interactively(NewProjectPromptContext {
@@ -589,12 +770,14 @@ fn run() -> Result<ExitCode, RepoctlError> {
             GraphCommand::Validate {
                 repo,
                 changed_files,
+                mode,
                 format,
             } => {
                 let changed_files = parse_changed_files(changed_files)?;
                 let report = repoctl.validate_graph(GraphValidateRequest {
                     repo,
                     changed_files,
+                    mode: mode.into(),
                 })?;
                 render_validation_report(&report, format, "Graph validation passed.")?;
                 Ok(exit_for_diagnostics(&report.diagnostics))
@@ -675,12 +858,27 @@ fn run() -> Result<ExitCode, RepoctlError> {
             Ok(exit_for_diagnostics(&report.diagnostics))
         }
         Command::Ci { command } => match command {
+            CiCommand::Workflow {
+                repo,
+                provider,
+                write,
+                format,
+            } => {
+                let report = repoctl.ci_workflow(CiWorkflowRequest {
+                    repo,
+                    provider: provider.into(),
+                    write,
+                })?;
+                render_ci_workflow(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
             CiCommand::Matrix {
                 repo,
                 tasks,
                 changed_files,
                 base,
                 head,
+                fallback,
                 format,
             } => {
                 let report = repoctl.ci_matrix(CiMatrixRequest {
@@ -689,9 +887,35 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     changed_files: parse_changed_files(changed_files)?,
                     base,
                     head,
+                    fallback: fallback.into(),
                 })?;
                 render_ci_matrix(&report, format)?;
                 Ok(ExitCode::SUCCESS)
+            }
+            CiCommand::RunStep {
+                task,
+                project,
+                workspace,
+                repo,
+                dry_run,
+                format,
+            } => {
+                let report = repoctl.run_task(TaskRunRequest {
+                    repo,
+                    tasks: vec![TaskName::new(task).map_err(RepoctlError::diagnostic)?],
+                    projects: vec![
+                        ProjectName::new(project.clone()).map_err(RepoctlError::diagnostic)?,
+                    ],
+                    workspaces: vec![format!("{project}:{workspace}")],
+                    affected: false,
+                    changed_files: Vec::new(),
+                    base: None,
+                    head: None,
+                    concurrency: None,
+                    dry_run,
+                })?;
+                render_task_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
             }
             CiCommand::Summarize { repo, format } => {
                 let report = repoctl.ci_matrix(CiMatrixRequest {
@@ -700,9 +924,72 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     changed_files: Vec::new(),
                     base: None,
                     head: None,
+                    fallback: CiFallback::All,
                 })?;
                 render_ci_matrix(&report, format)?;
                 Ok(ExitCode::SUCCESS)
+            }
+        },
+        Command::Adopt { command } => match command {
+            AdoptCommand::Plan {
+                source,
+                dest,
+                include,
+                exclude,
+                map,
+                kind,
+                owner,
+                rewrite_deps,
+                ci,
+                verification,
+                format,
+            } => {
+                let request = AdoptionPlanRequest {
+                    source,
+                    dest,
+                    include,
+                    exclude,
+                    map: parse_path_overrides(map)?,
+                    kind: parse_kind_overrides(kind)?,
+                    owner: parse_owner_overrides(owner)?,
+                    rewrite_deps: rewrite_deps.into(),
+                    ci: ci.into(),
+                    verification: verification.into(),
+                    format: adoption_output_format(format),
+                };
+                let plan = repoctl.adopt_plan(request)?;
+                render_adoption_plan(&plan, format)?;
+                Ok(exit_for_diagnostics(&plan.diagnostics))
+            }
+            AdoptCommand::Apply {
+                plan,
+                refresh,
+                format,
+            } => {
+                let applied = repoctl.adopt_apply(AdoptionApplyRequest { plan, refresh })?;
+                render_adoption_plan(&applied, format)?;
+                Ok(ExitCode::SUCCESS)
+            }
+            AdoptCommand::Verify { plan, format } => {
+                let report = repoctl.adopt_verify(AdoptionVerifyRequest { plan })?;
+                render_validation_report(&report, format, "Adoption verification passed.")?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+        },
+        Command::Hygiene { command } => match command {
+            HygieneCommand::Check { repo, format } => {
+                let report = repoctl.hygiene_check(HygieneCheckRequest { repo })?;
+                render_hygiene_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            HygieneCommand::Clean {
+                repo,
+                dry_run,
+                format,
+            } => {
+                let report = repoctl.hygiene_clean(HygieneCleanRequest { repo, dry_run })?;
+                render_hygiene_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
             }
         },
         Command::Template { command } => match command {
@@ -837,6 +1124,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 project,
                 env,
                 core,
+                dry_run,
                 changed_files,
                 base,
                 head,
@@ -854,7 +1142,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     base,
                     head,
                     changed_files: parse_changed_files(changed_files)?,
-                    dry_run: true,
+                    dry_run,
                 })?;
                 render_iac_report(&report, format)?;
                 Ok(exit_for_diagnostics(&report.diagnostics))
@@ -920,6 +1208,54 @@ impl From<IacProviderArg> for IacProvider {
     }
 }
 
+impl From<ValidationModeArg> for ValidationMode {
+    fn from(value: ValidationModeArg) -> Self {
+        match value {
+            ValidationModeArg::Structural => Self::Structural,
+            ValidationModeArg::Metadata => Self::Metadata,
+            ValidationModeArg::Full => Self::Full,
+        }
+    }
+}
+
+impl From<CiFallbackArg> for CiFallback {
+    fn from(value: CiFallbackArg) -> Self {
+        match value {
+            CiFallbackArg::All => Self::All,
+            CiFallbackArg::None => Self::None,
+            CiFallbackArg::Error => Self::Error,
+        }
+    }
+}
+
+impl From<CiProviderArg> for CiProvider {
+    fn from(value: CiProviderArg) -> Self {
+        match value {
+            CiProviderArg::GithubActions => Self::GitHubActions,
+        }
+    }
+}
+
+impl From<DependencyRewriteArg> for DependencyRewriteMode {
+    fn from(value: DependencyRewriteArg) -> Self {
+        match value {
+            DependencyRewriteArg::Auto => Self::Auto,
+            DependencyRewriteArg::Off => Self::Off,
+            DependencyRewriteArg::ReportOnly => Self::ReportOnly,
+        }
+    }
+}
+
+impl From<AdoptionCiArg> for AdoptionCiMode {
+    fn from(value: AdoptionCiArg) -> Self {
+        match value {
+            AdoptionCiArg::Update => Self::Update,
+            AdoptionCiArg::Off => Self::Off,
+            AdoptionCiArg::ReportOnly => Self::ReportOnly,
+        }
+    }
+}
+
 fn parse_changed_files(values: Vec<String>) -> Result<Vec<RepoRelativePath>, RepoctlError> {
     values
         .into_iter()
@@ -964,6 +1300,106 @@ fn parse_workspaces(values: Vec<String>) -> Result<Vec<String>, RepoctlError> {
         WorkspaceName::new(workspace.to_string()).map_err(RepoctlError::diagnostic)?;
     }
     Ok(values)
+}
+
+fn parse_path_overrides(
+    values: Vec<String>,
+) -> Result<BTreeMap<String, RepoRelativePath>, RepoctlError> {
+    values
+        .into_iter()
+        .map(|value| {
+            let (source, target) = parse_assignment(
+                &value,
+                "adoption.map.invalid",
+                "use SOURCE=DEST, for example operon=frameworks/operon",
+            )?;
+            let path =
+                RepoRelativePath::new(target.to_string()).map_err(RepoctlError::diagnostic)?;
+            Ok((source.to_string(), path))
+        })
+        .collect()
+}
+
+fn parse_kind_overrides(
+    values: Vec<String>,
+) -> Result<BTreeMap<String, ProjectKind>, RepoctlError> {
+    values
+        .into_iter()
+        .map(|value| {
+            let (source, kind) = parse_assignment(
+                &value,
+                "adoption.kind.invalid",
+                "use SOURCE=KIND, for example skills=tool",
+            )?;
+            Ok((source.to_string(), parse_project_kind_arg(kind)?))
+        })
+        .collect()
+}
+
+fn parse_owner_overrides(
+    values: Vec<String>,
+) -> Result<BTreeMap<String, OwnerHandle>, RepoctlError> {
+    values
+        .into_iter()
+        .map(|value| {
+            let (source, owner) = parse_assignment(
+                &value,
+                "adoption.owner.invalid",
+                "use SOURCE=@owner, for example operon=@platform",
+            )?;
+            Ok((
+                source.to_string(),
+                OwnerHandle::new(owner.to_string()).map_err(RepoctlError::diagnostic)?,
+            ))
+        })
+        .collect()
+}
+
+fn parse_assignment<'a>(
+    value: &'a str,
+    code: &'static str,
+    help: &'static str,
+) -> Result<(&'a str, &'a str), RepoctlError> {
+    let Some((left, right)) = value.split_once('=') else {
+        return Err(RepoctlError::diagnostic(
+            Diagnostic::error(code, format!("invalid assignment `{value}`")).with_help(help),
+        ));
+    };
+    if left.is_empty() || right.is_empty() {
+        return Err(RepoctlError::diagnostic(
+            Diagnostic::error(code, format!("invalid assignment `{value}`")).with_help(help),
+        ));
+    }
+    Ok((left, right))
+}
+
+fn parse_project_kind_arg(value: &str) -> Result<ProjectKind, RepoctlError> {
+    match value {
+        "app" => Ok(ProjectKind::App),
+        "framework" => Ok(ProjectKind::Framework),
+        "foundation-service" => Ok(ProjectKind::FoundationService),
+        "proto-root" => Ok(ProjectKind::ProtoRoot),
+        "core-infra" => Ok(ProjectKind::CoreInfra),
+        "core-infra-component" => Ok(ProjectKind::CoreInfraComponent),
+        "tool" => Ok(ProjectKind::Tool),
+        _ => Err(RepoctlError::diagnostic(
+            Diagnostic::error(
+                "adoption.kind.invalid",
+                format!("unsupported project kind `{value}`"),
+            )
+            .with_help(
+                "valid kinds: app, framework, foundation-service, core-infra-component, tool",
+            ),
+        )),
+    }
+}
+
+fn adoption_output_format(format: OutputFormat) -> AdoptionOutputFormat {
+    match format {
+        OutputFormat::Human => AdoptionOutputFormat::Human,
+        OutputFormat::Json => AdoptionOutputFormat::Json,
+        OutputFormat::GithubActions => AdoptionOutputFormat::GitHubActions,
+    }
 }
 
 fn parse_template_source(value: &str) -> Result<TemplateSource, RepoctlError> {
@@ -1261,6 +1697,142 @@ fn render_ci_matrix(report: &CiMatrixReport, format: OutputFormat) -> Result<(),
                     })
                     .collect(),
             );
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_ci_workflow(report: &CiWorkflowReport, format: OutputFormat) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            append_title(&mut output, "CI workflow");
+            let _ = writeln!(output, "Path: {}", report.path);
+            let _ = writeln!(output, "Bytes: {}", report.content.len());
+            append_operation_table(&mut output, "Operations", &report.operations);
+            append_diagnostics(&mut output, &report.diagnostics);
+            if report
+                .operations
+                .iter()
+                .any(|operation| operation.operation == "plan-file")
+            {
+                output.push_str(
+                    "\nWrite it with:\n  repoctl ci workflow --provider github-actions --write\n",
+                );
+            }
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_adoption_plan(plan: &AdoptionPlan, format: OutputFormat) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(plan),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            let selected = plan.sources.iter().filter(|source| !source.skipped).count();
+            let skipped = plan.sources.len().saturating_sub(selected);
+            append_title(&mut output, "Adoption plan");
+            let _ = writeln!(
+                output,
+                "{} source repos, {} selected, {} skipped",
+                plan.sources.len(),
+                selected,
+                skipped
+            );
+            append_table(
+                &mut output,
+                "Placement",
+                &["Source", "Destination", "Kind", "Confidence", "Decision"],
+                plan.sources
+                    .iter()
+                    .map(|source| {
+                        vec![
+                            source.name.clone(),
+                            if source.skipped {
+                                "skipped".to_string()
+                            } else {
+                                source.destination_path.to_string()
+                            },
+                            project_kind_label(&source.inferred_kind).to_string(),
+                            format!("{:.2}", source.confidence),
+                            if source.override_applied {
+                                "override".to_string()
+                            } else {
+                                source.reasons.join("; ")
+                            },
+                        ]
+                    })
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                "Dependency rewrites",
+                &["File", "Package", "To"],
+                plan.dependency_rewrites
+                    .iter()
+                    .map(|rewrite| {
+                        vec![
+                            rewrite.file.to_string(),
+                            rewrite.package.clone(),
+                            rewrite.to.clone(),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                "Copy operations",
+                &["Operation", "Destination"],
+                plan.operations
+                    .iter()
+                    .map(|operation| {
+                        vec![
+                            operation.operation.clone(),
+                            operation.destination_path.to_string(),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_operation_table(&mut output, "CI operations", &plan.ci_operations);
+            append_command_table(&mut output, "Verification", &plan.verification.commands);
+            if !plan.verification.prerequisites.is_empty() {
+                append_table(
+                    &mut output,
+                    "Prerequisites",
+                    &["Tool", "Reason"],
+                    plan.verification
+                        .prerequisites
+                        .iter()
+                        .map(|tool| vec![tool.tool.clone(), tool.reason.clone()])
+                        .collect(),
+                );
+            }
+            append_diagnostics(&mut output, &plan.diagnostics);
+            output.push_str("\nNext commands:\n");
+            output.push_str(
+                "  repoctl adopt plan --source <source> --dest <dest> --format json > \
+                 target/repoctl/adopt-plan.json\n",
+            );
+            output.push_str("  repoctl adopt apply --plan target/repoctl/adopt-plan.json\n");
+            output.push_str("  repoctl adopt verify --plan target/repoctl/adopt-plan.json\n");
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_hygiene_report(report: &HygieneReport, format: OutputFormat) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            append_title(&mut output, "Hygiene");
+            append_diagnostics(&mut output, &report.diagnostics);
+            append_operation_table(&mut output, "Cleanable operations", &report.operations);
+            if report.diagnostics.is_empty() {
+                output.push_str("No generated artifact leakage found.\n");
+            }
             write_stdout(&output)
         }
     }
@@ -1606,6 +2178,18 @@ fn severity_label(severity: &Severity) -> &'static str {
         Severity::Info => "info",
         Severity::Warning => "warning",
         Severity::Error => "error",
+    }
+}
+
+fn project_kind_label(kind: &ProjectKind) -> &'static str {
+    match kind {
+        ProjectKind::App => "app",
+        ProjectKind::Framework => "framework",
+        ProjectKind::FoundationService => "foundation-service",
+        ProjectKind::ProtoRoot => "proto-root",
+        ProjectKind::CoreInfra => "core-infra",
+        ProjectKind::CoreInfraComponent => "core-infra-component",
+        ProjectKind::Tool => "tool",
     }
 }
 

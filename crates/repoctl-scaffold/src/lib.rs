@@ -172,10 +172,11 @@ impl ScaffoldService {
             ProjectKind::App => Self::app_operations(request)?,
             ProjectKind::Framework => Self::framework_operations(request)?,
             ProjectKind::FoundationService => Self::foundation_operations(request)?,
-            ProjectKind::ProtoRoot | ProjectKind::CoreInfra => {
+            ProjectKind::Tool => Self::tool_operations(request)?,
+            ProjectKind::ProtoRoot | ProjectKind::CoreInfra | ProjectKind::CoreInfraComponent => {
                 return Err(RepoctlError::diagnostic(Diagnostic::error(
                     "new.kind.unsupported",
-                    "new project supports app, framework, and foundation-service",
+                    "new project supports app, framework, foundation-service, and tool",
                 )));
             }
         };
@@ -811,6 +812,24 @@ iac:
             operations.extend(iac_operations(request.path.as_str(), &slug, provider)?);
         }
         Ok(operations)
+    }
+
+    fn tool_operations(request: &NewProjectRequest) -> Result<Vec<FileOperation>, RepoctlError> {
+        let slug = slug_from_path(&request.path)?;
+        let project = project_name(&request.path, &ProjectKind::Tool)?;
+        let owner = owner_or_default(request.owner.as_ref(), &slug);
+        let manifest = format!(
+            r#"{MANAGED_HEADER}
+schema: company.project/v1
+name: {project}
+kind: tool
+path: {path}
+owners:
+  - "{owner}"
+"#,
+            path = request.path,
+        );
+        project_base_operations(request, &slug, manifest)
     }
 }
 
@@ -2072,6 +2091,8 @@ fn project_readme(request: &NewProjectRequest, slug: &str) -> String {
         ProjectKind::FoundationService => "foundation service",
         ProjectKind::ProtoRoot => "proto root",
         ProjectKind::CoreInfra => "core infrastructure",
+        ProjectKind::CoreInfraComponent => "core infrastructure component",
+        ProjectKind::Tool => "tool",
     };
     format!(
         r#"{MANAGED_HEADER}
@@ -2162,6 +2183,8 @@ fn project_name(path: &RepoRelativePath, kind: &ProjectKind) -> Result<String, R
         ProjectKind::App => "apps",
         ProjectKind::Framework => "frameworks",
         ProjectKind::FoundationService => "foundations",
+        ProjectKind::CoreInfraComponent => "core-infra",
+        ProjectKind::Tool => "tools",
         ProjectKind::ProtoRoot | ProjectKind::CoreInfra => {
             return Err(RepoctlError::diagnostic(Diagnostic::error(
                 "new.kind.unsupported",

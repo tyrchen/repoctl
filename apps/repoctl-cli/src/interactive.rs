@@ -79,7 +79,10 @@ impl InteractiveArgs for NewProjectArgs {
                     self.iac = prompt_iac_provider()?;
                 }
             }
-            ProjectKind::ProtoRoot | ProjectKind::CoreInfra => {}
+            ProjectKind::ProtoRoot
+            | ProjectKind::CoreInfra
+            | ProjectKind::CoreInfraComponent
+            | ProjectKind::Tool => {}
         }
         if self.owner.is_none() {
             self.owner = prompt_owner()?;
@@ -285,10 +288,13 @@ fn project_root(kind: &ProjectKind) -> Result<&'static str, Diagnostic> {
         ProjectKind::App => Ok(APP_ROOT),
         ProjectKind::Framework => Ok(FRAMEWORK_ROOT),
         ProjectKind::FoundationService => Ok(FOUNDATION_ROOT),
-        ProjectKind::ProtoRoot | ProjectKind::CoreInfra => Err(Diagnostic::error(
-            "new.kind.unsupported",
-            "new project supports app, framework, and foundation-service",
-        )),
+        ProjectKind::Tool => Ok("tools"),
+        ProjectKind::ProtoRoot | ProjectKind::CoreInfra | ProjectKind::CoreInfraComponent => {
+            Err(Diagnostic::error(
+                "new.kind.unsupported",
+                "new project supports app, framework, foundation-service, and tool",
+            ))
+        }
     }
 }
 
@@ -297,7 +303,10 @@ fn project_kind_command(kind: &ProjectKind) -> &'static str {
         ProjectKind::App => "app",
         ProjectKind::Framework => "framework",
         ProjectKind::FoundationService => "foundation",
-        ProjectKind::ProtoRoot | ProjectKind::CoreInfra => "project",
+        ProjectKind::ProtoRoot | ProjectKind::CoreInfra | ProjectKind::CoreInfraComponent => {
+            "project"
+        }
+        ProjectKind::Tool => "tool",
     }
 }
 
@@ -308,6 +317,8 @@ fn project_kind_label(kind: &ProjectKind) -> &'static str {
         ProjectKind::FoundationService => "foundation service",
         ProjectKind::ProtoRoot => "proto root",
         ProjectKind::CoreInfra => "core infrastructure",
+        ProjectKind::CoreInfraComponent => "core infrastructure component",
+        ProjectKind::Tool => "tool",
     }
 }
 
@@ -318,6 +329,8 @@ fn example_slug(kind: &ProjectKind) -> &'static str {
         ProjectKind::FoundationService => "identity",
         ProjectKind::ProtoRoot => "protos",
         ProjectKind::CoreInfra => "core-infra",
+        ProjectKind::CoreInfraComponent => "nucleus",
+        ProjectKind::Tool => "skills",
     }
 }
 

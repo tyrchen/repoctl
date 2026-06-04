@@ -381,6 +381,73 @@ pub enum ProjectKind {
     ProtoRoot,
     /// Shared infrastructure baseline.
     CoreInfra,
+    /// Independently owned component under the core infrastructure lane.
+    CoreInfraComponent,
+    /// Developer, agent, or repository automation tooling.
+    Tool,
+}
+
+/// Workspace execution toolchain.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Toolchain {
+    /// Cargo toolchain.
+    Cargo,
+    /// npm toolchain.
+    Npm,
+    /// pnpm toolchain.
+    Pnpm,
+    /// Yarn toolchain.
+    Yarn,
+    /// Bun toolchain.
+    Bun,
+    /// uv toolchain.
+    Uv,
+    /// Custom toolchain name.
+    Custom(String),
+}
+
+impl Toolchain {
+    /// Parses a manifest toolchain value.
+    pub fn parse(value: &str) -> Result<Self, Diagnostic> {
+        if value.is_empty() || value.len() > NAME_MAX_BYTES {
+            return Err(Diagnostic::error(
+                "manifest.workspace.toolchain",
+                "toolchain must be non-empty and length-bounded",
+            ));
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(Diagnostic::error(
+                "manifest.workspace.toolchain",
+                "toolchain contains unsupported characters",
+            ));
+        }
+        Ok(match value {
+            "cargo" => Self::Cargo,
+            "npm" => Self::Npm,
+            "pnpm" => Self::Pnpm,
+            "yarn" => Self::Yarn,
+            "bun" => Self::Bun,
+            "uv" => Self::Uv,
+            custom => Self::Custom(custom.to_string()),
+        })
+    }
+
+    /// Returns the manifest representation.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Cargo => "cargo",
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+            Self::Yarn => "yarn",
+            Self::Bun => "bun",
+            Self::Uv => "uv",
+            Self::Custom(value) => value.as_str(),
+        }
+    }
 }
 
 /// Workspace language.
@@ -496,8 +563,8 @@ pub struct WorkspaceSpec {
     pub name: WorkspaceName,
     /// Workspace language.
     pub language: WorkspaceLanguage,
-    /// Optional toolchain name such as `bun` or `uv`.
-    pub toolchain: Option<String>,
+    /// Optional execution toolchain such as `npm`, `bun`, or `uv`.
+    pub toolchain: Option<Toolchain>,
     /// Workspace root relative to the project root.
     pub root: ProjectRelativePath,
     /// Workspace manifest path relative to the project root.
@@ -518,6 +585,20 @@ pub struct TaskCommand {
     pub workspace: WorkspaceName,
     /// Command in argv form.
     pub command: CommandSpec,
+    /// Commands that must run before this command.
+    pub depends_on: Vec<TaskDependency>,
+}
+
+/// Task prerequisite edge.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDependency {
+    /// Project containing the prerequisite task.
+    pub project: ProjectName,
+    /// Workspace containing the prerequisite task.
+    pub workspace: WorkspaceName,
+    /// Task to run first.
+    pub task: TaskName,
 }
 
 /// Task run plan command in argv form.
@@ -1006,6 +1087,21 @@ pub struct GraphValidateRequest {
     pub repo: Option<PathBuf>,
     /// Changed files used by path-based policy rules.
     pub changed_files: Vec<RepoRelativePath>,
+    /// Validation depth.
+    pub mode: ValidationMode,
+}
+
+/// Graph validation mode.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ValidationMode {
+    /// Structural manifest and policy checks only.
+    #[default]
+    Structural,
+    /// Structural checks plus offline metadata checks when available.
+    Metadata,
+    /// Metadata checks plus full task-planning/environment checks.
+    Full,
 }
 
 /// Request to print a graph.
@@ -1363,6 +1459,21 @@ pub struct CiMatrixRequest {
     pub base: Option<String>,
     /// Optional head git ref.
     pub head: Option<String>,
+    /// Behavior when affected-file detection cannot select entries.
+    pub fallback: CiFallback,
+}
+
+/// CI fallback behavior.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CiFallback {
+    /// Include all projects with requested tasks.
+    All,
+    /// Include no projects.
+    #[default]
+    None,
+    /// Fail when no changed-file signal is available.
+    Error,
 }
 
 /// CI matrix report.
@@ -1373,6 +1484,297 @@ pub struct CiMatrixReport {
     pub entries: Vec<serde_json::Value>,
     /// GitHub Actions-safe matrix object.
     pub github_actions: serde_json::Value,
+}
+
+/// Supported CI workflow provider.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CiProvider {
+    /// GitHub Actions.
+    #[default]
+    GitHubActions,
+}
+
+/// Request to render a CI workflow.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CiWorkflowRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Workflow provider.
+    pub provider: CiProvider,
+    /// Write the generated workflow file.
+    pub write: bool,
+}
+
+/// Rendered CI workflow.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CiWorkflowReport {
+    /// Workflow file path.
+    pub path: RepoRelativePath,
+    /// Workflow content.
+    pub content: String,
+    /// Planned or applied operations.
+    pub operations: Vec<FileOperation>,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Hygiene request.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HygieneCheckRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+}
+
+/// Hygiene clean request.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HygieneCleanRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Plan without deleting files.
+    pub dry_run: bool,
+}
+
+/// Hygiene report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HygieneReport {
+    /// Hygiene diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Cleanable generated-artifact operations.
+    pub operations: Vec<FileOperation>,
+}
+
+/// Dependency rewrite mode for adoption planning.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyRewriteMode {
+    /// Rewrite supported dependencies automatically.
+    #[default]
+    Auto,
+    /// Do not inspect or rewrite dependencies.
+    Off,
+    /// Report rewrite candidates without changing copied files.
+    ReportOnly,
+}
+
+/// CI behavior for adoption planning.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdoptionCiMode {
+    /// Update generated CI files.
+    #[default]
+    Update,
+    /// Do not generate CI changes.
+    Off,
+    /// Report CI changes without applying them.
+    ReportOnly,
+}
+
+/// Adoption output format.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdoptionOutputFormat {
+    /// Human-readable report.
+    #[default]
+    Human,
+    /// JSON report.
+    Json,
+    /// GitHub Actions format.
+    GitHubActions,
+}
+
+/// Request to create an adoption plan.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptionPlanRequest {
+    /// Directory containing source repositories or a single source repository.
+    pub source: PathBuf,
+    /// Destination initialized monorepo.
+    pub dest: PathBuf,
+    /// Source names to include.
+    pub include: Vec<String>,
+    /// Source names to exclude.
+    pub exclude: Vec<String>,
+    /// Placement overrides keyed by source name.
+    pub map: BTreeMap<String, RepoRelativePath>,
+    /// Project-kind overrides keyed by source name.
+    pub kind: BTreeMap<String, ProjectKind>,
+    /// Owner overrides keyed by source name.
+    pub owner: BTreeMap<String, OwnerHandle>,
+    /// Dependency rewrite mode.
+    pub rewrite_deps: DependencyRewriteMode,
+    /// CI generation behavior.
+    pub ci: AdoptionCiMode,
+    /// Verification mode.
+    pub verification: ValidationMode,
+    /// Requested output format.
+    pub format: AdoptionOutputFormat,
+}
+
+/// Request to apply a reviewed adoption plan.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptionApplyRequest {
+    /// Plan JSON file.
+    pub plan: PathBuf,
+    /// Recompute inference before applying.
+    pub refresh: bool,
+}
+
+/// Request to verify a reviewed adoption plan.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptionVerifyRequest {
+    /// Plan JSON file.
+    pub plan: PathBuf,
+}
+
+/// Adoption plan.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptionPlan {
+    /// Source root.
+    pub source_root: Utf8PathBuf,
+    /// Destination repo root.
+    pub dest_root: Utf8PathBuf,
+    /// Source repository decisions.
+    pub sources: Vec<AdoptedSource>,
+    /// Copy operations.
+    pub operations: Vec<AdoptionFileOperation>,
+    /// Dependency rewrite operations.
+    pub dependency_rewrites: Vec<DependencyRewrite>,
+    /// Synthesized manifests.
+    pub manifest_syntheses: Vec<ProjectManifestSynthesis>,
+    /// CI file operations.
+    pub ci_operations: Vec<FileOperation>,
+    /// Verification plan.
+    pub verification: VerificationPlan,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Source repository selected for adoption.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedSource {
+    /// Source repository name.
+    pub name: String,
+    /// Source path.
+    pub source_path: Utf8PathBuf,
+    /// Destination path.
+    pub destination_path: RepoRelativePath,
+    /// Inferred kind.
+    pub inferred_kind: ProjectKind,
+    /// Confidence score from 0.0 to 1.0.
+    pub confidence: f32,
+    /// Inference reasons.
+    pub reasons: Vec<String>,
+    /// Inventory snapshot.
+    pub inventory: SourceInventory,
+    /// Whether this source is skipped.
+    pub skipped: bool,
+    /// Whether placement was explicitly overridden.
+    pub override_applied: bool,
+}
+
+/// Source inventory collected before planning.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceInventory {
+    /// Repository name.
+    pub name: String,
+    /// Whether a VCS marker exists.
+    pub has_vcs: bool,
+    /// README first heading or summary.
+    pub readme_summary: Option<String>,
+    /// Primary manifest paths.
+    pub manifests: Vec<String>,
+    /// Top-level directories.
+    pub top_level_dirs: Vec<String>,
+    /// Dependency package names referenced by source manifests.
+    pub dependency_references: Vec<String>,
+    /// Generated artifact paths found in the source.
+    pub generated_artifacts: Vec<String>,
+    /// Required local tools inferred from manifests and build scripts.
+    pub required_tools: Vec<String>,
+}
+
+/// Adoption file operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptionFileOperation {
+    /// Operation id.
+    pub id: String,
+    /// Operation kind.
+    pub operation: String,
+    /// Optional source file path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<Utf8PathBuf>,
+    /// Destination path relative to the destination repo root.
+    pub destination_path: RepoRelativePath,
+    /// Optional UTF-8 replacement content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// File checksum when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+}
+
+/// Dependency rewrite record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyRewrite {
+    /// File being rewritten.
+    pub file: RepoRelativePath,
+    /// Package or crate dependency name.
+    pub package: String,
+    /// Original dependency value.
+    pub from: String,
+    /// Replacement dependency value.
+    pub to: String,
+    /// Dependency surface.
+    pub surface: DependencySurface,
+    /// Owning project.
+    pub owner_project: ProjectName,
+}
+
+/// Synthesized project manifest record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectManifestSynthesis {
+    /// Source repository name.
+    pub source: String,
+    /// Project name.
+    pub project: ProjectName,
+    /// Manifest path.
+    pub manifest_path: RepoRelativePath,
+    /// Synthesized YAML.
+    pub content: String,
+}
+
+/// Verification plan generated for adoption.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationPlan {
+    /// Tool prerequisites.
+    pub prerequisites: Vec<ToolPrerequisite>,
+    /// Ordered commands.
+    pub commands: Vec<ProcessCommand>,
+}
+
+/// Required local tool.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPrerequisite {
+    /// Tool name.
+    pub tool: String,
+    /// Why it is needed.
+    pub reason: String,
 }
 
 /// Request for PR summary.
@@ -1553,12 +1955,16 @@ pub fn validate_project_convention(project: &ProjectManifest) -> Vec<Diagnostic>
         ProjectKind::FoundationService => "foundations/",
         ProjectKind::ProtoRoot => "protos",
         ProjectKind::CoreInfra => "core-infra",
+        ProjectKind::CoreInfraComponent => "core-infra/",
+        ProjectKind::Tool => "tools/",
     };
     let valid = match project.kind {
         ProjectKind::ProtoRoot | ProjectKind::CoreInfra => project.path.as_str() == expected_prefix,
-        ProjectKind::App | ProjectKind::Framework | ProjectKind::FoundationService => {
-            project.path.as_str().starts_with(expected_prefix)
-        }
+        ProjectKind::App
+        | ProjectKind::Framework
+        | ProjectKind::FoundationService
+        | ProjectKind::CoreInfraComponent
+        | ProjectKind::Tool => project.path.as_str().starts_with(expected_prefix),
     };
     if valid {
         Vec::new()

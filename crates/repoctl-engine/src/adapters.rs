@@ -208,7 +208,8 @@ fn classify_path_dependency(
                     EdgeKind::UsesFoundationInternal
                 }
             }
-            repoctl_core::ProjectKind::CoreInfra => {
+            repoctl_core::ProjectKind::CoreInfra
+            | repoctl_core::ProjectKind::CoreInfraComponent => {
                 let surface = classify_core_infra_module(relative, target);
                 match surface {
                     DependencySurface::CoreInfraPublicModule => EdgeKind::UsesCoreInfraModule,
@@ -218,9 +219,9 @@ fn classify_path_dependency(
                     _ => EdgeKind::DependsOnProject,
                 }
             }
-            repoctl_core::ProjectKind::App | repoctl_core::ProjectKind::ProtoRoot => {
-                EdgeKind::DependsOnProject
-            }
+            repoctl_core::ProjectKind::App
+            | repoctl_core::ProjectKind::ProtoRoot
+            | repoctl_core::ProjectKind::Tool => EdgeKind::DependsOnProject,
         };
         return Some(DiscoveredEdge {
             from_project: input.project.name.to_string(),
