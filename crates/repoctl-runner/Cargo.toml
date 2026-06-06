@@ -16,6 +16,7 @@ camino.workspace = true
 globset.workspace = true
 repoctl-core.workspace = true
 repoctl-engine.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

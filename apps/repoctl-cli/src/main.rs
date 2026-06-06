@@ -24,11 +24,14 @@ use repoctl::{
     ExplainReport, ExplainRequest, FileOperation, GraphPrintReport, GraphPrintRequest,
     GraphValidateRequest, HygieneCheckRequest, HygieneCleanRequest, HygieneReport, IacFacadeReport,
     IacFacadeRequest, IacProvider, InitPlan, InitProfile, InitRequest, NewProjectRequest,
-    OwnerHandle, PrSummary, PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName,
-    ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation, ProtoPackageName, RenderPlan,
-    RepoLayout, RepoName, RepoRelativePath, Repoctl, RepoctlError, Severity, SkillsFacadeRequest,
-    TaskName, TaskRunReport, TaskRunRequest, TemplateListReport, TemplateListRequest,
-    TemplateRenderRequest, TemplateSource, ValidationMode, ValidationReport, WorkspaceName,
+    OpsJournalAction, OpsJournalReport, OpsJournalRequest, OpsPlan, OpsPlanRequest,
+    OpsReconcileReport, OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest, OwnerHandle,
+    PrSummary, PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName, ProtoFacadeReport,
+    ProtoFacadeRequest, ProtoOperation, ProtoPackageName, ProviderCapabilityReport,
+    ProviderCapabilityRequest, RenderPlan, RepoLayout, RepoName, RepoRelativePath, Repoctl,
+    RepoctlError, Severity, SkillsFacadeRequest, TaskName, TaskRunReport, TaskRunRequest,
+    TemplateListReport, TemplateListRequest, TemplateRenderRequest, TemplateSource, ValidationMode,
+    ValidationReport, WorkspaceName,
 };
 
 mod interactive;
@@ -213,6 +216,16 @@ enum Command {
     Iac {
         #[command(subcommand)]
         command: IacCommand,
+    },
+    /// Plan and verify operational infrastructure sessions.
+    Ops {
+        #[command(subcommand)]
+        command: OpsCommand,
+    },
+    /// Inspect provider package capabilities.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommand,
     },
     /// Check and synchronize generated skills.
     Skills {
@@ -552,6 +565,7 @@ enum PrCommand {
 #[derive(Debug, Subcommand)]
 enum IacCommand {
     /// Plan provider commands.
+    #[command(alias = "preview")]
     Plan {
         /// Repository root or path inside the repo.
         #[arg(long)]
@@ -580,6 +594,157 @@ enum IacCommand {
         /// Head git ref.
         #[arg(long)]
         head: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpsCommand {
+    /// Build an ordered operations plan.
+    Plan {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Base git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref.
+        #[arg(long)]
+        head: Option<String>,
+        /// Explicit changed file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Target environment or stack.
+        #[arg(long = "env")]
+        environments: Vec<String>,
+        /// Comma-separated task names.
+        #[arg(long, value_delimiter = ',')]
+        tasks: Vec<String>,
+        /// Write JSON plan to this path.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Plan non-mutating verification commands.
+    Verify {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Plan JSON path.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Manage a local operations session journal.
+    Journal {
+        #[command(subcommand)]
+        command: OpsJournalCommand,
+    },
+    /// Review manual state recorded in a plan.
+    Reconcile {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Plan JSON path.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpsJournalCommand {
+    /// Start a session journal.
+    Start {
+        /// Session name.
+        #[arg(long)]
+        name: String,
+        /// Optional plan id.
+        #[arg(long)]
+        plan_id: Option<String>,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Add a command evidence entry.
+    AddCommand {
+        /// Session id or name.
+        #[arg(long)]
+        session: String,
+        /// Optional exit status.
+        #[arg(long)]
+        exit_status: Option<i32>,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Command and arguments after `--`.
+        command: Vec<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Add a note evidence entry.
+    AddNote {
+        /// Session id or name.
+        #[arg(long)]
+        session: String,
+        /// Note kind.
+        #[arg(long = "kind")]
+        note_kind: String,
+        /// Note message.
+        #[arg(long)]
+        message: String,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+    /// Render a Markdown session summary.
+    Summary {
+        /// Session id or name.
+        #[arg(long)]
+        session: String,
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommand {
+    /// Inspect provider package capabilities.
+    Capabilities {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Workspace selector in project:workspace or repo-relative path form.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Base git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref.
+        #[arg(long)]
+        head: Option<String>,
+        /// Explicit changed file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
@@ -1146,6 +1311,108 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 })?;
                 render_iac_report(&report, format)?;
                 Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+        },
+        Command::Ops { command } => match command {
+            OpsCommand::Plan {
+                repo,
+                base,
+                head,
+                changed_files,
+                environments,
+                tasks,
+                output,
+                format,
+            } => {
+                let report = repoctl.ops_plan(OpsPlanRequest {
+                    repo,
+                    base,
+                    head,
+                    changed_files: parse_changed_files(changed_files)?,
+                    environments,
+                    tasks: parse_tasks(tasks)?,
+                    output,
+                })?;
+                render_ops_plan(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            OpsCommand::Verify { repo, plan, format } => {
+                let report = repoctl.ops_verify(OpsVerifyRequest { repo, plan })?;
+                render_ops_verify_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            OpsCommand::Journal { command } => {
+                let (repo, action, format) = match command {
+                    OpsJournalCommand::Start {
+                        name,
+                        plan_id,
+                        repo,
+                        format,
+                    } => (repo, OpsJournalAction::Start { name, plan_id }, format),
+                    OpsJournalCommand::AddCommand {
+                        session,
+                        exit_status,
+                        repo,
+                        command,
+                        format,
+                    } => (
+                        repo,
+                        OpsJournalAction::AddCommand {
+                            session,
+                            command: command.join(" "),
+                            exit_status,
+                        },
+                        format,
+                    ),
+                    OpsJournalCommand::AddNote {
+                        session,
+                        note_kind,
+                        message,
+                        repo,
+                        format,
+                    } => (
+                        repo,
+                        OpsJournalAction::AddNote {
+                            session,
+                            note_kind,
+                            message,
+                        },
+                        format,
+                    ),
+                    OpsJournalCommand::Summary {
+                        session,
+                        repo,
+                        format,
+                    } => (repo, OpsJournalAction::Summary { session }, format),
+                };
+                let report = repoctl.ops_journal(OpsJournalRequest { repo, action })?;
+                render_ops_journal_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            OpsCommand::Reconcile { repo, plan, format } => {
+                let report = repoctl.ops_reconcile(OpsReconcileRequest { repo, plan })?;
+                render_ops_reconcile_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+        },
+        Command::Provider { command } => match command {
+            ProviderCommand::Capabilities {
+                repo,
+                workspace,
+                base,
+                head,
+                changed_files,
+                format,
+            } => {
+                let report = repoctl.provider_capabilities(ProviderCapabilityRequest {
+                    repo,
+                    workspace,
+                    base,
+                    head,
+                    changed_files: parse_changed_files(changed_files)?,
+                })?;
+                render_provider_capabilities(&report, format)?;
+                Ok(exit_for_provider_reports(&report))
             }
         },
         Command::Skills { command } => match command {
@@ -1910,6 +2177,235 @@ fn render_iac_report(report: &IacFacadeReport, format: OutputFormat) -> Result<(
     }
 }
 
+fn render_ops_plan(plan: &OpsPlan, format: OutputFormat) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(plan),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            append_title(&mut output, "Operations plan");
+            let _ = writeln!(output, "Id: {}", plan.id);
+            append_list_section(&mut output, "Environments", plan.environments.clone());
+            append_list_section(
+                &mut output,
+                "Affected projects",
+                plan.affected
+                    .directly_affected
+                    .iter()
+                    .chain(plan.affected.transitively_affected.iter())
+                    .map(ToString::to_string)
+                    .collect(),
+            );
+            append_command_table(&mut output, "Task dry-run", &plan.task_plan.commands);
+            append_table(
+                &mut output,
+                &format!("IaC previews ({})", plan.iac.len()),
+                &["Project", "Workspace", "Stack", "Command"],
+                plan.iac
+                    .iter()
+                    .map(|operation| {
+                        vec![
+                            operation
+                                .project
+                                .as_ref()
+                                .map_or_else(|| "core-infra".to_string(), ToString::to_string),
+                            operation.workspace.clone(),
+                            operation.stack.clone(),
+                            command_line(&operation.preview_command),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                &format!("DNS ({})", plan.dns.len()),
+                &["Record", "Target", "Proxied"],
+                plan.dns
+                    .iter()
+                    .map(|operation| {
+                        vec![
+                            operation.record.clone(),
+                            operation.expected_target.clone(),
+                            operation
+                                .expected_proxied
+                                .map_or_else(|| "unknown".to_string(), |value| value.to_string()),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                &format!("CDN ({})", plan.cdn.len()),
+                &["Provider", "Alias", "Headers"],
+                plan.cdn
+                    .iter()
+                    .map(|check| {
+                        vec![
+                            check.provider.clone(),
+                            check.alias.clone(),
+                            check.expected_response_headers.join(", "),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                &format!(
+                    "Provider capabilities ({})",
+                    plan.provider_capabilities.len()
+                ),
+                &["Workspace", "Package", "Version", "Status"],
+                plan.provider_capabilities
+                    .iter()
+                    .map(|report| {
+                        vec![
+                            report.workspace.clone(),
+                            report.package.clone(),
+                            report.version.clone(),
+                            report.status.clone(),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_table(
+                &mut output,
+                &format!("Probes ({})", plan.probes.len()),
+                &["Name", "Method", "URL"],
+                plan.probes
+                    .iter()
+                    .map(|probe| vec![probe.name.clone(), probe.method.clone(), probe.url.clone()])
+                    .collect(),
+            );
+            append_list_section(&mut output, "Required env", plan.required_env.clone());
+            append_list_section(&mut output, "Production gaps", plan.production_gaps.clone());
+            append_diagnostics(&mut output, &plan.diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_ops_verify_report(
+    report: &OpsVerifyReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            append_title(&mut output, "Operations verification");
+            append_command_table(&mut output, "Non-mutating commands", &report.commands);
+            append_command_table(
+                &mut output,
+                "Skipped mutating commands",
+                &report.skipped_mutating_commands,
+            );
+            append_diagnostics(&mut output, &report.diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_ops_reconcile_report(
+    report: &OpsReconcileReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            append_title(&mut output, "Manual-state reconciliation");
+            append_table(
+                &mut output,
+                &format!("Records ({})", report.records.len()),
+                &["Kind", "Resource", "Status", "Managed equivalent"],
+                report
+                    .records
+                    .iter()
+                    .map(|record| {
+                        vec![
+                            record.kind.clone(),
+                            record.resource.clone(),
+                            record.status.clone(),
+                            record.managed_equivalent.clone().unwrap_or_default(),
+                        ]
+                    })
+                    .collect(),
+            );
+            append_command_table(&mut output, "Cleanup commands", &report.cleanup_commands);
+            append_diagnostics(&mut output, &report.diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_ops_journal_report(
+    report: &OpsJournalReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            if let Some(markdown) = &report.markdown {
+                return write_stdout(markdown);
+            }
+            let mut output = String::new();
+            append_title(&mut output, "Operations journal");
+            if let Some(path) = &report.path {
+                let _ = writeln!(output, "Path: {}", path.display());
+            }
+            if let Some(journal) = &report.journal {
+                let _ = writeln!(output, "Session: {} ({})", journal.name, journal.id);
+                let _ = writeln!(output, "Entries: {}", journal.entries.len());
+            }
+            append_diagnostics(&mut output, &report.diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_provider_capabilities(
+    report: &[ProviderCapabilityReport],
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            append_title(&mut output, "Provider capabilities");
+            append_table(
+                &mut output,
+                &format!("Reports ({})", report.len()),
+                &[
+                    "Workspace",
+                    "Package",
+                    "Version",
+                    "Field",
+                    "Status",
+                    "Advice",
+                ],
+                report
+                    .iter()
+                    .map(|item| {
+                        vec![
+                            item.workspace.clone(),
+                            item.package.clone(),
+                            item.version.clone(),
+                            item.field.clone(),
+                            item.status.clone(),
+                            item.advice.clone(),
+                        ]
+                    })
+                    .collect(),
+            );
+            let diagnostics = report
+                .iter()
+                .flat_map(|item| item.diagnostics.clone())
+                .collect::<Vec<_>>();
+            append_diagnostics(&mut output, &diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
 fn append_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
     if diagnostics.is_empty() {
         return;
@@ -2193,7 +2689,7 @@ fn project_kind_label(kind: &ProjectKind) -> &'static str {
     }
 }
 
-fn write_json<T: serde::Serialize>(value: &T) -> Result<(), RepoctlError> {
+fn write_json<T: serde::Serialize + ?Sized>(value: &T) -> Result<(), RepoctlError> {
     let mut stdout = io::stdout().lock();
     serde_json::to_writer_pretty(&mut stdout, value)
         .map_err(|error| RepoctlError::Internal(format!("failed to render JSON: {error}")))?;
@@ -2233,6 +2729,19 @@ fn exit_for_diagnostics(diagnostics: &[Diagnostic]) -> ExitCode {
         .iter()
         .any(|diagnostic| diagnostic.severity == Severity::Error)
     {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn exit_for_provider_reports(reports: &[ProviderCapabilityReport]) -> ExitCode {
+    if reports.iter().any(|report| {
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
+    }) {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

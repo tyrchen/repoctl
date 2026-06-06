@@ -611,6 +611,7 @@ dependencies = [
  "globset",
  "repoctl-core",
  "repoctl-engine",
+ "serde",
  "serde_json",
  "tempfile",
 ]

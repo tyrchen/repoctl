@@ -333,6 +333,40 @@ impl Repoctl {
         &self.iac
     }
 
+    /// Builds an operations plan.
+    pub fn ops_plan(&self, request: OpsPlanRequest) -> Result<OpsPlan, RepoctlError> {
+        self.runner.ops_plan(&request)
+    }
+
+    /// Builds a non-mutating operations verification report.
+    pub fn ops_verify(&self, request: OpsVerifyRequest) -> Result<OpsVerifyReport, RepoctlError> {
+        self.runner.ops_verify(&request)
+    }
+
+    /// Builds a manual-state reconciliation report.
+    pub fn ops_reconcile(
+        &self,
+        request: OpsReconcileRequest,
+    ) -> Result<OpsReconcileReport, RepoctlError> {
+        self.runner.ops_reconcile(&request)
+    }
+
+    /// Manages local operations session journals.
+    pub fn ops_journal(
+        &self,
+        request: OpsJournalRequest,
+    ) -> Result<OpsJournalReport, RepoctlError> {
+        self.runner.ops_journal(&request)
+    }
+
+    /// Inspects provider capabilities.
+    pub fn provider_capabilities(
+        &self,
+        request: ProviderCapabilityRequest,
+    ) -> Result<Vec<ProviderCapabilityReport>, RepoctlError> {
+        self.runner.provider_capabilities(&request)
+    }
+
     /// Returns the skills facade.
     pub fn skills(&self) -> &SkillsFacade {
         &self.skills
@@ -2108,9 +2142,10 @@ mod tests {
     use super::{
         AdoptionApplyRequest, AdoptionCiMode, AdoptionOutputFormat, AdoptionPlanRequest,
         AiContextRequest, CodegenCheckRequest, DependencyRewriteMode, DiscoverRequest,
-        GraphValidateRequest, HygieneCheckRequest, IacFacadeRequest, PrSummaryRequest, ProjectName,
-        ProtoFacadeRequest, ProtoOperation, RepoRelativePath, Repoctl, TemplateListRequest,
-        TemplateRenderRequest, TemplateSource, ValidationMode,
+        GraphValidateRequest, HygieneCheckRequest, IacFacadeRequest, OpsPlanRequest,
+        OpsReconcileRequest, OpsVerifyRequest, PrSummaryRequest, ProjectName, ProtoFacadeRequest,
+        ProtoOperation, ProviderCapabilityRequest, RepoRelativePath, Repoctl, TaskName,
+        TaskRunRequest, TemplateListRequest, TemplateRenderRequest, TemplateSource, ValidationMode,
     };
 
     #[test]
@@ -2287,6 +2322,137 @@ mod tests {
             .expect("iac plan");
         assert_eq!(report.commands[0].program, "pulumi");
         assert_eq!(report.commands[0].cwd.as_str(), "apps/catalog/iac");
+    }
+
+    #[test]
+    fn test_should_plan_operations_session_review_surface() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_universe_ops_fixture(temp.path());
+        let facade = Repoctl::with_default_adapters().expect("facade");
+        let changed_files =
+            vec![RepoRelativePath::new("frameworks/operon/operon-infra/index.ts").expect("path")];
+
+        let affected = facade
+            .affected(repoctl_core::AffectedRequest {
+                repo: Some(temp.path().to_path_buf()),
+                base: None,
+                head: None,
+                changed_files: changed_files.clone(),
+                tasks: vec![TaskName::new("check").expect("task")],
+            })
+            .expect("affected");
+        let unique_tasks = affected
+            .tasks
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(affected.tasks.len(), unique_tasks.len());
+        assert!(
+            affected
+                .tasks
+                .iter()
+                .any(|task| task == "apps.slides:infra:check")
+        );
+
+        let task_report = facade
+            .run_task(TaskRunRequest {
+                repo: Some(temp.path().to_path_buf()),
+                tasks: vec![TaskName::new("check").expect("task")],
+                affected: true,
+                changed_files: changed_files.clone(),
+                dry_run: true,
+                ..TaskRunRequest::default()
+            })
+            .expect("task dry-run");
+        assert!(task_report.commands.iter().any(|command| {
+            command.project.as_ref().is_some_and(|project| {
+                project.as_str() == "apps.slides" && command.task.as_ref().is_some()
+            })
+        }));
+
+        let plan_path = temp.path().join("target/repoctl/ops-plan.json");
+        let plan = facade
+            .ops_plan(OpsPlanRequest {
+                repo: Some(temp.path().to_path_buf()),
+                changed_files: changed_files.clone(),
+                environments: vec!["staging".to_string()],
+                tasks: vec![TaskName::new("check").expect("task")],
+                output: Some(plan_path.clone()),
+                ..OpsPlanRequest::default()
+            })
+            .expect("ops plan");
+        assert!(plan_path.is_file());
+        assert!(plan.iac.windows(2).any(|window| window[0].workspace
+            == "frameworks/operon/operon-infra"
+            && window[1].workspace == "apps/slides/infra"));
+        assert!(plan.dns.iter().any(
+            |operation| operation.record == "slides.dev.int.iostream.app"
+                && operation.expected_proxied == Some(false)
+        ));
+        assert!(
+            plan.cdn
+                .iter()
+                .any(|check| check.provider == "aws-cloudfront")
+        );
+        assert!(
+            plan.provider_capabilities
+                .iter()
+                .any(|report| report.status == "missing"
+                    && report.field == "invokedViaFunctionUrl")
+        );
+        assert!(
+            plan.probes
+                .iter()
+                .any(|probe| probe.name == "ligand-health")
+        );
+        assert!(
+            plan.manual_reconciliation
+                .iter()
+                .any(|record| record.kind == "manual.lambda.add-permission")
+        );
+
+        let verify = facade
+            .ops_verify(OpsVerifyRequest {
+                repo: Some(temp.path().to_path_buf()),
+                plan: plan_path.clone(),
+            })
+            .expect("ops verify");
+        assert!(!verify.commands.is_empty());
+        assert!(!verify.skipped_mutating_commands.is_empty());
+
+        let reconcile = facade
+            .ops_reconcile(OpsReconcileRequest {
+                repo: Some(temp.path().to_path_buf()),
+                plan: plan_path,
+            })
+            .expect("ops reconcile");
+        assert!(
+            reconcile
+                .cleanup_commands
+                .iter()
+                .any(|command| command.program == "aws")
+        );
+
+        let capabilities = facade
+            .provider_capabilities(ProviderCapabilityRequest {
+                repo: Some(temp.path().to_path_buf()),
+                workspace: Some("frameworks.operon:infra".to_string()),
+                changed_files,
+                ..ProviderCapabilityRequest::default()
+            })
+            .expect("provider capabilities");
+        assert_eq!(capabilities[0].status, "missing");
+
+        let summary = facade
+            .pr_summary(PrSummaryRequest {
+                repo: Some(temp.path().to_path_buf()),
+                changed_files: vec![
+                    RepoRelativePath::new("frameworks/operon/operon-infra/index.ts").expect("path"),
+                ],
+                ..PrSummaryRequest::default()
+            })
+            .expect("pr summary");
+        assert!(summary.markdown.contains("Deploy Surface"));
+        assert!(summary.markdown.contains("CloudFront"));
     }
 
     #[test]
@@ -2473,6 +2639,172 @@ protos:
 "#,
         )
         .expect("identity manifest");
+    }
+
+    fn write_universe_ops_fixture(root: &Path) {
+        fs::write(
+            root.join("repo.yaml"),
+            r#"
+schema: company.repo/v1
+name: universe
+layout: functional
+defaults:
+  owner: "@platform"
+iac:
+  core_infra_root: core-infra
+"#,
+        )
+        .expect("repo manifest");
+        fs::create_dir_all(root.join("core-infra/nucleus")).expect("core dir");
+        fs::write(
+            root.join("core-infra/nucleus/Pulumi.yaml"),
+            "name: nucleus\n",
+        )
+        .expect("core pulumi");
+
+        fs::create_dir_all(root.join("frameworks/operon/operon-infra")).expect("operon infra");
+        fs::write(
+            root.join("frameworks/operon/operon-infra/package.json"),
+            r#"{"dependencies":{"@pulumi/aws":"6.83.4"}}"#,
+        )
+        .expect("operon package");
+        fs::write(
+            root.join("frameworks/operon/operon-infra/index.ts"),
+            "const permission = { invokedViaFunctionUrl: true };\n",
+        )
+        .expect("operon source");
+        fs::write(
+            root.join("frameworks/operon/project.yaml"),
+            r#"
+schema: company.project/v1
+name: frameworks.operon
+kind: framework
+path: frameworks/operon
+owners:
+  - "@platform"
+workspaces:
+  - name: infra
+    language: typescript
+    toolchain: npm
+    root: operon-infra
+    manifest: operon-infra/package.json
+tasks:
+  check:
+    - workspace: infra
+      command: npm run check
+iac:
+  root: operon-infra
+  provider: pulumi
+  stacks:
+    - staging
+"#,
+        )
+        .expect("operon manifest");
+
+        fs::create_dir_all(root.join("apps/slides/infra")).expect("slides infra");
+        fs::write(root.join("apps/slides/infra/package.json"), "{}").expect("slides package");
+        fs::write(
+            root.join("apps/slides/project.yaml"),
+            r#"
+schema: company.project/v1
+name: apps.slides
+kind: app
+path: apps/slides
+owners:
+  - "@slides"
+depends_on:
+  - frameworks.operon
+workspaces:
+  - name: infra
+    language: typescript
+    toolchain: npm
+    root: infra
+    manifest: infra/package.json
+tasks:
+  check:
+    - workspace: infra
+      command: npm run check
+    - workspace: infra
+      command: npm run check
+iac:
+  root: infra
+  provider: pulumi
+  stacks:
+    - staging
+dns:
+  provider: cloudflare
+  records:
+    - name: slides.dev.int.iostream.app
+      type: cname
+      target:
+        kind: cloudfront-distribution
+        output: cdnDomainName
+      proxied: false
+      ttl: 300
+cdn:
+  provider: aws-cloudfront
+  aliases:
+    - slides.dev.int.iostream.app
+  expected_response_headers:
+    - "via: *CloudFront*"
+ops:
+  runtime_dependencies:
+    - project: foundations.ligand
+      endpoint: https://ligand.dev.int.iostream.app
+      purpose: invitation verification
+  probes:
+    - name: slides-callback
+      method: GET
+      url: https://slides.dev.int.iostream.app/api/auth/google/callback?state=test&code=test
+      expect:
+        status: 401
+        body_contains: missing cookie header
+  manual_state:
+    - kind: manual.lambda.add-permission
+      resource: cellis-slides-staging-fn-url-invoke-public-manual
+      status: pending-cleanup
+      managed_equivalent: pulumi-nodejs:dynamic:Resource cellis-slides-staging-fn-url-invoke-public
+      cleanup_command: aws lambda remove-permission --function-name cellis-slides-staging-fn --statement-id cellis-slides-staging-fn-url-invoke-public-manual
+"#,
+        )
+        .expect("slides manifest");
+
+        fs::create_dir_all(root.join("foundations/ligand/infra")).expect("ligand infra");
+        fs::write(root.join("foundations/ligand/infra/package.json"), "{}")
+            .expect("ligand package");
+        fs::write(
+            root.join("foundations/ligand/project.yaml"),
+            r#"
+schema: company.project/v1
+name: foundations.ligand
+kind: foundation-service
+path: foundations/ligand
+owners:
+  - "@identity"
+workspaces:
+  - name: infra
+    language: typescript
+    root: infra
+    manifest: infra/package.json
+tasks:
+  check:
+    - workspace: infra
+      command: npm run check
+iac:
+  root: infra
+  provider: pulumi
+  stacks:
+    - staging
+ops:
+  probes:
+    - name: ligand-health
+      method: HEAD
+      url: https://ligand.dev.int.iostream.app
+      expect:
+        status: 200
+"#,
+        )
+        .expect("ligand manifest");
     }
 
     fn write_adoption_fixture(source: &Path, dest: &Path) {

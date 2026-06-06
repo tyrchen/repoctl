@@ -10,3 +10,7 @@
 ## repoctl v0.3
 
 - [Adoption And Monorepo Hardening Spec](repoctl-v0.3-adoption-spec.md)
+
+## repoctl v0.4
+
+- [Operations Session Review Spec](repoctl-v0.4-operations-session-review-spec.md)
