@@ -29,6 +29,18 @@ IMPORTANT: Never enter plan mode automatically!!! Never enter plan mode automati
   - For new automation tasks, always add a Makefile target instead of creating shell scripts
   - Keep automation consistent and discoverable
 
+### Repoctl Verification Budget
+
+- Keep repoctl out of the inner coding loop for source-only edits, formatting, lint fixes, and test fixes.
+- Treat common repoctl commands as reference commands, not a mandatory command sequence.
+- Run repoctl validation once at todo-batch or goal completion with the smallest surface that answers the verification question.
+- Run `repoctl graph validate` before editing only when graph inputs may change: `repo.yaml`, `project.yaml`, workspaces, task wiring, generated-code policy, proto ownership, CI routing, templates, skills, or cross-project dependency boundaries.
+- Run `repoctl affected` once per todo batch when impact, CI routing, PR readiness, or verification selection matters.
+- Use at most one affected dry-run when task selection is unclear or expensive. Do not run per-project/per-task dry-run matrices.
+- Run `repoctl skills check` only when agent instructions, skills, skill sources, or sync behavior changed.
+- If unrelated branch changes widen `repoctl affected`, state that and switch to explicit project-scoped verification.
+- Report skipped heavyweight gates and why they were not relevant.
+
 ## Documentation
 
 For specs, explore ./specs directory and put it to the right place, name the spec file as {feature-name}-{type}.md and update index.md accordingly. type can be prd, design, impl-plan, verification-plan, review, etc.

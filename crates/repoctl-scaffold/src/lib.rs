@@ -1015,6 +1015,7 @@ fn apply_operations(
             if !current.contains(MANAGED_HEADER)
                 && !current.contains(LINE_COMMENT_MANAGED_HEADER)
                 && !current.contains(BLOCK_BEGIN)
+                && !is_repoctl_owned_skill_path(operation.path.as_str())
                 && operation.operation != "block"
             {
                 diagnostics.push(
@@ -1050,6 +1051,10 @@ fn apply_operations(
         return Err(RepoctlError::Diagnostics { diagnostics });
     }
     Ok(diagnostics)
+}
+
+fn is_repoctl_owned_skill_path(path: &str) -> bool {
+    path.starts_with(".agents/skills/") || path.starts_with(".claude/skills/")
 }
 
 fn skill_operations() -> Result<Vec<FileOperation>, RepoctlError> {
@@ -1151,13 +1156,11 @@ name: "{name}"
 description: "{description}"
 ---
 
-{MANAGED_HEADER}
-
 # {name}
 
-This skill is generated for {product}. Keep it synchronized with `repoctl skills sync`. It is
-intended to be directly usable after `repoctl init`; teams should tune owners, commands, and local
-exceptions rather than replacing the workflow with a placeholder.
+This skill records repository policy for {product}. Use repoctl as the authority for graph,
+ownership, affected analysis, task routing, and final hand-off verification, but keep repoctl out of
+the inner coding loop unless the graph or boundaries are changing.
 
 {rendered_body}
 "#,
@@ -1182,80 +1185,99 @@ fn repoctl_skill(surface: AgentSurface) -> String {
          workflows.",
         r#"## When this fires
 
-- Before changing `repo.yaml`, any `project.yaml`, generated files, CI selection, task wiring, or
-  agent context.
-- When the user asks which projects are affected, which checks to run, or why CI picked a matrix.
-- When a change crosses app, framework, foundation, proto, IaC, or skill boundaries.
-- Before using broad package-manager commands in a large repo.
+- The user asks which projects are affected, which checks to run, or why CI picked a matrix.
+- A change touches `repo.yaml`, `project.yaml`, workspaces, task wiring, generated-code policy,
+  proto ownership, CI routing, templates, skills, or cross-project dependencies.
+- A todo batch or goal is complete and needs final repoctl-scoped verification.
+- Before using broad package-manager commands in a large repo when project routing is unclear.
 
 If the repository has no `repo.yaml`, do not guess the graph. Run `repoctl init --dry-run` only when
 the user is asking to adopt repoctl; otherwise inspect the existing repo layout manually.
+
+## Verification budget
+
+- Choose the smallest repoctl surface that answers the current question.
+- Keep repoctl out of the inner coding loop for source-only edits, formatting, lint fixes, and test
+  fixes.
+- Run repoctl validation once at the end of a todo batch or goal.
+- Do not recompute affected projects after source-only edits unless task-routing inputs changed.
+- Use at most one affected dry-run when task selection is unclear or expensive.
+- Do not run per-project/per-task dry-run matrices.
+- Run `repoctl skills check` only when agent instructions, skills, skill sources, or sync behavior
+  changed.
+- If unrelated branch changes widen `repoctl affected`, state that and switch to explicit
+  project-scoped verification.
 
 ## What to produce
 
 - A short statement of the relevant project(s), owners, and changed surfaces.
 - The exact repoctl commands used, with `--format json` when the result feeds automation.
-- A scoped verification recommendation: affected tasks first, broader gates only when the diff
-  changes shared policy, templates, or graph code.
+- A scoped final verification recommendation; broader gates belong to shared policy, templates,
+  graph code, or structural changes.
+- Any heavyweight gate skipped and why it was not relevant.
 
-## Workflow
+## Reference Commands
 
-1. **Anchor on the graph**:
+Treat these as reference commands, not a mandatory sequence.
+
+- **Validate graph inputs**:
 
    ```bash
    repoctl graph validate --format human
    ```
 
-   Treat errors as blockers. Fix stale manifests, invalid paths, duplicate project names, or broken
-   dependencies before editing code that relies on the graph.
+  Run before editing only when graph inputs may change: `repo.yaml`, `project.yaml`, workspaces,
+  task wiring, generated-code policy, proto ownership, CI routing, templates, skills, or
+  cross-project dependency boundaries. Also run once at hand-off for structural changes.
 
-2. **Explain the target**:
+- **Explain an owned project**:
 
    ```bash
    repoctl explain <project-name>
    ```
 
-   Use this before changing a project manifest, dependency, task, proto ownership, IaC root, deploy
-   environment, or AI editable area.
+  Use before changing a project manifest, dependency, task, proto ownership, IaC root, deploy
+  environment, or AI editable area.
 
-3. **Compute impact**:
+- **Compute impact or select verification**:
 
    ```bash
    repoctl affected --base origin/main --head HEAD --tasks check,test,build --format human
    ```
 
-   Use the merge-base or PR base that matches the review target. If `origin/main` is not the target
-   branch, name the actual base explicitly in the hand-off.
+  Run once per todo batch when impact, CI routing, PR readiness, or verification selection matters.
+  Use the merge-base or PR base that matches the review target. If `origin/main` is not the target
+  branch, name the actual base explicitly in the hand-off.
 
-4. **Inspect changed code shape**:
+- **Inspect changed code shape at hand-off**:
 
    ```bash
    repoctl inspect size --scope changed --base origin/main --head HEAD --fail-on warning
    ```
 
-   Run this for Rust, TypeScript/TSX, or Python source changes before review. Use
-   `--scope affected` when a change fans out across an owned project, and `--scope all` when shared
-   thresholds, excludes, templates, skills, or graph/inspection logic change. Treat oversized files,
-   functions, and nested blocks as refactoring findings unless an explicit `inspection.code_size`
-   override with a concrete reason applies.
+  Run this for Rust, TypeScript/TSX, or Python source changes before review. Use `--scope affected`
+  when a change fans out across an owned project, and `--scope all` when shared thresholds,
+  excludes, templates, skills, or graph/inspection logic change. Treat oversized files, functions,
+  and nested blocks as refactoring findings unless an explicit `inspection.code_size` override with
+  a concrete reason applies.
 
-5. **Dry-run expensive work**:
+- **Dry-run only when routing is unclear**:
 
    ```bash
    repoctl run check --affected --dry-run
-   repoctl run test --affected --dry-run
    ```
 
-   Run the real tasks only after the dry-run confirms the intended project set.
+  Use no more than one affected dry-run to confirm an expensive or ambiguous task selection. Do not
+  expand this into a per-project/per-task dry-run matrix.
 
-6. **Generate agent context only when it helps**:
+- **Generate agent context only when it helps**:
 
    ```bash
    repoctl context <project-name> --format json
    ```
 
-   Use context packs for multi-file edits or unfamiliar ownership. Do not treat generated context as
-   a replacement for reading the source files that will be changed.
+  Use context packs for multi-file edits or unfamiliar ownership. Do not treat context as a
+  replacement for reading the source files that will be changed.
 
 ## Quality bar
 
@@ -1265,12 +1287,14 @@ the user is asking to adopt repoctl; otherwise inspect the existing repo layout 
   code-size findings, configured overrides, or intentionally broader scope in the hand-off.
 - Do broaden to repo-wide checks when `repo.yaml`, templates, skills, root CI, or graph validation
   logic changes.
+- Do not run per-project/per-task dry-run matrices.
 - Final responses should name skipped heavyweight gates and why they were not relevant.
 
 ## Hand-off
 
-Report the graph status, affected projects, selected commands, and any owner or boundary concerns.
-If diagnostics remain, stop and show the concrete diagnostic rather than claiming the repo is ready.
+Report the graph status when relevant, affected projects, selected commands, and any owner or
+boundary concerns. If diagnostics remain, stop and show the concrete diagnostic rather than claiming
+the repo is ready.
 "#,
         surface,
     )
@@ -1309,7 +1333,7 @@ fn boundary_skill(surface: AgentSurface) -> String {
    - `core-infra/` - shared infrastructure.
    - `.agents/skills/`, `.claude/skills/`, `templates/`, `.github/` - repo-wide policy or tooling.
 
-2. **Read the nearest manifest**:
+2. **Read the nearest manifest when ownership is unclear**:
 
    ```bash
    repoctl explain <project-name>
@@ -1321,12 +1345,13 @@ fn boundary_skill(surface: AgentSurface) -> String {
 3. **Check dependency direction**:
 
    ```bash
-   repoctl graph validate
    repoctl lint-boundaries --changed-file <path>
    ```
 
    Apps can call framework facades and foundation clients. Framework internals and service internals
-   are not public API unless declared as facades or clients.
+   are not public API unless declared as facades or clients. Run `repoctl graph validate` before
+   editing only when manifests, workspaces, task wiring, generated-code policy, or cross-project
+   dependencies changed.
 
 4. **Choose the right home for new code**:
 
@@ -1336,11 +1361,14 @@ fn boundary_skill(surface: AgentSurface) -> String {
    - Put cross-cutting infrastructure in `core-infra/`.
    - Put contracts in `protos/` and generated outputs under consumer workspaces.
 
-5. **Verify ownership after edits**:
+5. **Verify boundaries once at hand-off**:
 
    ```bash
    repoctl affected --base origin/main --head HEAD --tasks check,test
    ```
+
+   Run affected analysis once at hand-off to select the final verification surface. Do not pair
+   every boundary check with graph validation.
 
 ## Review checklist
 
@@ -1350,6 +1378,8 @@ fn boundary_skill(surface: AgentSurface) -> String {
 - Production IaC and deploy files have the owning team called out.
 - Manifest changes include owners, tasks, workspaces, and AI editable/do-not-edit areas where
   relevant.
+- Graph validation was run for structural boundary inputs, or the hand-off explains why the change
+  was source-only.
 
 ## Hand-off
 
@@ -1407,14 +1437,16 @@ source root. Generated code is consumer-local output and should not be edited to
    - Keep package names stable.
    - Check JSON names and language-specific reserved words when adding public fields.
 
-5. **Run the proto gate**:
+5. **Run proto verification once at hand-off**:
 
    ```bash
    repoctl proto check --base origin/main --head HEAD
    repoctl affected --base origin/main --head HEAD --tasks check,test
    ```
 
-   If the repo has a declared generation task, run it through `repoctl run` for affected consumers.
+   Run `repoctl proto check` at hand-off and run affected analysis once to select consumer
+   verification. Do not recompute affected after source-only proto fixes. If the repo has a
+   declared generation task, run it through `repoctl run` for affected consumers.
 
 ## Review checklist
 
@@ -1480,15 +1512,17 @@ contract or platform runtime, prefer a foundation service.
    and add missing owner handles. Do not remove privacy settings such as `publish = false` or
    `"private": true` unless the repo policy explicitly permits publishing.
 
-4. **Validate the result**:
+4. **Validate once after the scaffold is complete**:
 
    ```bash
    repoctl graph validate
-   repoctl run check --project <project-name> --dry-run
-   repoctl run test --project <project-name> --dry-run
+   repoctl run check --project <project-name>
    ```
 
-   Run the real project tasks after the dry-run shows the expected workspaces.
+   Keep graph validation as the final scaffold validation. Run the real project check once at
+   hand-off. Run test or build only when the scaffold includes tests, generated clients, package
+   metadata, build outputs, deploy artifacts, or task wiring that need verification. Use a dry-run
+   only when task routing itself is unclear.
 
 ## Review checklist
 
@@ -1497,6 +1531,8 @@ contract or platform runtime, prefer a foundation service.
 - Generated packages are private and internal by default.
 - Project docs and agent instructions point to the correct project name and path.
 - The first commit leaves `repoctl graph validate` green.
+- Project checks ran once at hand-off, with test/build gates included only when the scaffold needed
+  them.
 
 ## Hand-off
 
@@ -1525,13 +1561,14 @@ Summaries come after findings. Do not approve a risky diff just because the chan
 
 ## Workflow
 
-1. **Validate the graph first**:
+1. **Validate the graph when routing inputs changed**:
 
    ```bash
    repoctl graph validate
    ```
 
-   A broken graph makes affected analysis untrustworthy.
+   A broken graph makes affected analysis untrustworthy, but graph validation is optional for
+   source-only PRs.
 
 2. **Summarize PR impact**:
 
@@ -1539,7 +1576,8 @@ Summaries come after findings. Do not approve a risky diff just because the chan
    repoctl pr summary --base origin/main --head HEAD --format human
    ```
 
-   Use the actual PR base branch when it is not `origin/main`.
+   Use the actual PR base branch when it is not `origin/main`. Run this once unless graph or
+   task-routing inputs change during review.
 
 3. **Compute verification surface**:
 
@@ -1548,7 +1586,8 @@ Summaries come after findings. Do not approve a risky diff just because the chan
    ```
 
    Compare this with the checks that actually ran. Missing affected tasks are findings, not
-   footnotes.
+   footnotes. Do not repeat affected analysis to work around unrelated branch-wide changes; state
+   the widening and switch to explicit project-scoped verification.
 
 4. **Inspect code-size risk**:
 
@@ -1591,6 +1630,7 @@ If there are no findings, say so clearly and name residual risks or skipped gate
 - Code-size inspection is included for Rust, TypeScript/TSX, or Python source changes, and any
   finding is either called out or tied to a configured override.
 - Owner review is explicit for production IaC, proto breaking changes, and framework internals.
+- Repoctl impact commands run once unless graph or task-routing inputs changed during review.
 - Do not replace code review with repoctl output; repoctl scopes the review, it does not perform it.
 
 ## Hand-off
@@ -1661,14 +1701,33 @@ This repository is an internal functional monorepo. {product} must treat `repo.y
 
 ## Required Discipline
 
-- Use `repoctl` before and after structural changes. Start with `repoctl graph validate`.
+- Keep repoctl out of the inner coding loop for source-only edits, formatting, lint fixes, and test
+  fixes.
+- Validate once at todo-batch or goal completion with the smallest repoctl surface that answers the
+  verification question.
+- Use `repoctl graph validate` before editing only when graph inputs may change: `repo.yaml`,
+  `project.yaml`, workspaces, task wiring, generated-code policy, proto ownership, CI routing,
+  templates, skills, or cross-project dependency boundaries.
 - Keep app, framework, foundation, proto, and core-infra boundaries intact.
 - Do not edit generated files directly. Change source templates, proto contracts, or generators instead.
 - Do not add public publishing metadata unless the repository owner explicitly asks for it. Generated packages are private by default.
 - Do not create root-level language workspaces. Language workspaces belong inside functional projects.
 - Keep secrets out of files, logs, tests, and generated examples.
 
-## Standard Commands
+## Repoctl Verification Budget
+
+- Treat common repoctl commands as reference commands, not a mandatory sequence.
+- Run `repoctl affected` once per todo batch when impact, CI routing, PR readiness, or verification
+  selection matters.
+- Use at most one affected dry-run when task selection is unclear or expensive; do not run
+  per-project/per-task dry-run matrices.
+- Run `repoctl skills check` only when agent instructions, skills, skill sources, or sync behavior
+  changed.
+- If unrelated branch changes widen `repoctl affected`, state that and switch to explicit
+  project-scoped verification.
+- Report skipped heavyweight gates and why they were not relevant.
+
+## Reference Commands
 
 ```bash
 repoctl graph validate
@@ -1953,24 +2012,22 @@ Generated from built-in repoctl template `{name}`.
 3. Run `repoctl graph validate`.
 "#
         )),
-        "AGENTS.md.j2" => Ok(format!(
-            r#"{MANAGED_HEADER}
-## {{{{ name }}}} Template Rules
+        "AGENTS.md.j2" => Ok(
+            r#"## {{ name }} Template Rules
 
 - Keep generated files private to this internal monorepo.
 - Add concrete owners before review.
-- Run `repoctl graph validate` after rendering this template.
+- Run repoctl validation once at hand-off after rendering this template.
 "#
-        )),
-        "SKILL.md.j2" => Ok(format!(
+            .to_string(),
+        ),
+        "SKILL.md.j2" => Ok(
             r#"---
-name: "{{{{ name }}}}"
-description: "Repository-local workflow for {{{{ name }}}}."
+name: "{{ name }}"
+description: "Repository-local workflow for {{ name }}."
 ---
 
-{MANAGED_HEADER}
-
-# {{{{ name }}}}
+# {{ name }}
 
 Use this local skill for a repository-specific workflow in this private monorepo. Replace the
 example sections with concrete triggers, commands, quality gates, and hand-off notes before relying
@@ -1978,7 +2035,7 @@ on it in reviews.
 
 ## When this fires
 
-- A user asks for the {{{{ name }}}} workflow by name.
+- A user asks for the {{ name }} workflow by name.
 - A task touches files, ownership, or policy that this workflow owns.
 - Another skill needs this workflow as a prerequisite and no more specific local skill applies.
 
@@ -1995,14 +2052,15 @@ on it in reviews.
 2. **Identify ownership** - run `repoctl explain <project-name>` when the work is project-scoped.
 3. **Make the change** - stay inside the owning project unless repoctl affected analysis identifies a
    wider impact.
-4. **Validate structure** - run `repoctl graph validate` after structural, manifest, template,
-   skill, or CI changes.
-5. **Inspect code size** - run `repoctl inspect size --scope changed --base origin/main --head HEAD
+4. **Validate structure at hand-off** - run `repoctl graph validate` once after structural,
+   manifest, template, skill, or CI changes.
+5. **Inspect code size at hand-off** - run `repoctl inspect size --scope changed --base origin/main --head HEAD
    --fail-on warning` for Rust, TypeScript/TSX, or Python source changes. Use `--scope affected`
    for project-wide risk and `--scope all` when this workflow changes shared code-size policy,
    templates, skills, or inspection logic.
-6. **Validate behavior** - run `repoctl affected --base origin/main --head HEAD --tasks check,test`
-   before review, then execute the affected tasks that match the changed surface.
+6. **Validate behavior once at hand-off** - run `repoctl affected --base origin/main --head HEAD
+   --tasks check,test` before review when impact or task selection matters, then execute the
+   affected tasks that match the changed surface.
 7. **Escalate deliberately** - call out owners when the change touches production IaC, proto
    contracts, generated-code policy, or cross-project dependencies.
 
@@ -2020,7 +2078,8 @@ on it in reviews.
 Report the owning project or repo-wide surface, commands run, findings, and next action. If a
 required owner decision is missing, stop and ask for it instead of inventing policy.
 "#
-        )),
+            .to_string(),
+        ),
         "openai.yaml.j2" => Ok(r#"interface:
   display_name: "{{ name }}"
   short_description: "Run the {{ name }} repository workflow"
@@ -2148,8 +2207,9 @@ This {kind} is managed by `repoctl`.
 
 ## Local Commands
 
+Run project checks once at hand-off instead of after every code change.
+
 ```bash
-repoctl graph validate
 repoctl explain {project}
 repoctl run check --project {project}
 repoctl run test --project {project}
@@ -2169,13 +2229,13 @@ fn project_agents(request: &NewProjectRequest, slug: &str, surface: AgentSurface
     let project =
         project_name(&request.path, &request.kind).unwrap_or_else(|_| format!("unknown.{slug}"));
     format!(
-        r#"{MANAGED_HEADER}
-## {slug} Project Rules for {product}
+        r#"## {slug} Project Rules for {product}
 
 - Treat `{path}/project.yaml` as the source of truth for this project.
 - Stay inside `{path}/` unless repoctl affected analysis or an owner explicitly requires a cross-project edit.
 - Run `repoctl explain {project}` before changing dependencies or generated areas.
-- Run `repoctl run check --project {project}` after code changes when the project defines a `check` task.
+- Run project checks once at hand-off when the project defines matching tasks, not after every code
+  change.
 - Do not edit generated files or production IaC without owner review.
 "#,
         product = surface.product_name(),
@@ -2918,6 +2978,56 @@ mod tests {
         .expect("agent config");
         assert!(config.contains("display_name: \"Repoctl\""));
         assert!(config.contains("default_prompt:"));
+    }
+
+    #[test]
+    fn test_should_generate_verification_budget_agent_policy() {
+        for skill in skill_specs(AgentSurface::Codex) {
+            assert!(
+                !skill.content.contains("@generated by repoctl"),
+                "skill `{}` should not contain the old generated marker",
+                skill.name,
+            );
+            assert!(
+                !skill
+                    .content
+                    .contains("Keep it synchronized with `repoctl skills sync`"),
+                "skill `{}` should not describe local policy as temporary generated output",
+                skill.name,
+            );
+        }
+
+        let repoctl = repoctl_skill(AgentSurface::Codex);
+        assert!(repoctl.contains("reference commands, not a mandatory sequence"));
+        assert!(repoctl.contains("once at the end of a todo batch or goal"));
+        assert!(!repoctl.contains("repoctl run test --affected --dry-run"));
+
+        let app_creation = app_creation_skill(AgentSurface::Codex);
+        assert!(!app_creation.contains("repoctl run check --project <project-name> --dry-run"));
+        assert!(!app_creation.contains("repoctl run test --project <project-name> --dry-run"));
+        assert!(app_creation.contains("Run the real project check once at"));
+
+        let root_agents = root_agents("acme", AgentSurface::Codex);
+        assert!(root_agents.contains("Repoctl Verification Budget"));
+        assert!(root_agents.contains("reference commands, not a mandatory sequence"));
+        assert!(root_agents.contains("Validate once at todo-batch or goal completion"));
+
+        let request = NewProjectRequest {
+            repo: None,
+            kind: ProjectKind::App,
+            path: RepoRelativePath::new("apps/catalog").expect("path"),
+            stack: Vec::new(),
+            languages: Vec::new(),
+            clients: Vec::new(),
+            facade: false,
+            iac: None,
+            proto: None,
+            owner: None,
+            dry_run: true,
+        };
+        let project_agents = project_agents(&request, "catalog", AgentSurface::Codex);
+        assert!(!project_agents.contains("@generated by repoctl"));
+        assert!(project_agents.contains("Run project checks once at hand-off"));
     }
 
     #[test]
