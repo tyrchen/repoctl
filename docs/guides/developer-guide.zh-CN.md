@@ -32,7 +32,7 @@ rustup toolchain install 1.96.0
 cargo --version
 ```
 
-格式化使用 nightly：
+格式化使用 nightly，CI 也运行同一个格式化命令：
 
 ```bash
 cargo +nightly fmt

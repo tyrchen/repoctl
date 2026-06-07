@@ -32,7 +32,7 @@ rustup toolchain install 1.96.0
 cargo --version
 ```
 
-Use the pinned toolchain by default. Formatting is run with nightly because the repository policy requires `cargo +nightly fmt`.
+Use the pinned toolchain by default. Formatting is run with nightly because the repository policy requires `cargo +nightly fmt`, and CI runs the same formatter.
 
 ## Common commands
 

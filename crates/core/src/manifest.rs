@@ -1699,11 +1699,11 @@ post_render:
     #[test]
     fn test_should_parse_code_size_override() {
         let yaml = format!(
-                "{REPO}\ninspection:\n  code_size:\n    rules:\n      function:\n        \
+            "{REPO}\ninspection:\n  code_size:\n    rules:\n      function:\n        \
                  max_lines: 120\n    overrides:\n      - paths:\n          - \
                  \"crates/core/src/domain.rs\"\n        rules:\n          file:\n            \
                  max_lines: 1600\n        reason: \"public schema module\"\n"
-            );
+        );
         let manifest = YamlManifestParser
             .parse_repo_bytes("repo.yaml", yaml.as_bytes())
             .expect("repo parses");

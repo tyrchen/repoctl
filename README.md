@@ -154,6 +154,7 @@ Most commands accept `--repo` and `--format human|json|github-actions`. Human ou
 ## Developing repoctl
 
 This repository uses Rust 2024 and the pinned toolchain in `rust-toolchain.toml`.
+Formatting uses nightly rustfmt, and CI runs the same formatter.
 
 Useful commands:
 
