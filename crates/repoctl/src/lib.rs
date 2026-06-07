@@ -393,7 +393,6 @@ impl Repoctl {
 
     /// Runs read-only repository health checks.
     pub fn doctor(&self, request: DoctorRequest) -> DoctorReport {
-        let mut sections = Vec::new();
         let repo = request.repo.clone();
         let changed_files = request.changed_files.clone();
         let base = request.base.clone();
@@ -404,129 +403,52 @@ impl Repoctl {
             request.tasks.clone()
         };
 
-        sections.push(doctor_section(
-            "graph",
-            self.validate_graph(GraphValidateRequest {
-                repo: repo.clone(),
-                changed_files: changed_files.clone(),
-                mode: ValidationMode::Metadata,
-            })
-            .map(|report| (report.diagnostics, "graph metadata validation".to_string())),
-        ));
-        sections.push(doctor_section(
-            "affected",
-            self.affected(AffectedRequest {
-                repo: repo.clone(),
-                base: base.clone(),
-                head: head.clone(),
-                changed_files: changed_files.clone(),
-                tasks: tasks.clone(),
-            })
-            .map(|report| {
-                (
-                    report.diagnostics,
-                    format!(
-                        "{} affected projects, {} tasks",
-                        report.directly_affected.len() + report.transitively_affected.len(),
-                        report.tasks.len()
-                    ),
-                )
-            }),
-        ));
-        sections.push(doctor_section(
-            "skills",
-            self.skills()
-                .check(SkillsFacadeRequest {
-                    repo: repo.clone(),
-                    sync: false,
-                    dry_run: false,
-                })
-                .map(|report| {
-                    (
-                        report.diagnostics,
-                        format!("{} skill files drifted", report.diffs.len()),
-                    )
-                }),
-        ));
-        sections.push(doctor_section(
-            "hygiene",
-            self.hygiene_check(HygieneCheckRequest { repo: repo.clone() })
-                .map(|report| {
-                    (
-                        report.diagnostics,
-                        format!("{} cleanable operations", report.operations.len()),
-                    )
-                }),
-        ));
-        sections.push(doctor_section(
-            "codegen",
-            self.codegen_check(CodegenCheckRequest {
-                repo: repo.clone(),
-                base: base.clone(),
-                head: head.clone(),
-                changed_files: changed_files.clone(),
-            })
-            .map(|report| (report.diagnostics, "generated-code policy".to_string())),
-        ));
-        sections.push(doctor_section(
-            "inspect-size",
-            self.inspect_code_size(CodeSizeInspectionRequest {
-                repo: repo.clone(),
-                scope: CodeSizeScope::Changed,
-                base: base.clone(),
-                head: head.clone(),
-                changed_files: changed_files.clone(),
-                include_transitive: false,
-                languages: Vec::new(),
-                rules: Vec::new(),
-                fail_on: InspectionFailOn::Never,
-            })
-            .map(|report| {
-                let mut diagnostics = report.diagnostics;
-                diagnostics.extend(report.findings.into_iter().map(|finding| {
-                    Diagnostic::warning("inspect.code_size.finding", finding.message)
-                        .with_path(finding.path.to_string())
-                }));
-                (
+        if let Err(error) = locate_repo_path(repo.as_deref()) {
+            let diagnostics = diagnostics_from_error(error);
+            return DoctorReport {
+                status: DoctorStatus::Blocked,
+                command_succeeded: false,
+                has_errors: true,
+                sections: vec![DoctorSection {
+                    name: "repo".to_string(),
+                    status: DoctorStatus::Blocked,
+                    summary: "repoctl repo root could not be located".to_string(),
                     diagnostics,
-                    format!("{} findings", report.summary.finding_count),
-                )
-            }),
-        ));
-        sections.push(doctor_section(
-            "proto",
-            self.proto()
-                .check(ProtoFacadeRequest {
-                    repo: repo.clone(),
-                    operation: ProtoOperation::Check,
-                    selector: None,
-                    base: base.clone(),
-                    head: head.clone(),
-                    changed_files: changed_files.clone(),
-                })
-                .map(|report| (report.diagnostics, "proto routing and policy".to_string())),
-        ));
-        sections.push(doctor_section(
-            "iac",
-            self.iac()
-                .plan(IacFacadeRequest {
-                    repo: repo.clone(),
-                    affected: true,
-                    project: None,
-                    env: Some("staging".to_string()),
-                    core: false,
-                    base: base.clone(),
-                    head,
-                    changed_files,
-                    dry_run: true,
-                })
-                .map(|report| {
-                    (
-                        report.diagnostics,
-                        format!("{} dry-run preview commands", report.commands.len()),
-                    )
-                }),
-        ));
+                }],
+            };
+        }
+
+        let sections = vec![
+            self.doctor_graph_section(repo.clone(), changed_files.clone()),
+            self.doctor_affected_section(
+                repo.clone(),
+                base.clone(),
+                head.clone(),
+                changed_files.clone(),
+                tasks,
+            ),
+            self.doctor_skills_section(repo.clone()),
+            self.doctor_hygiene_section(repo.clone()),
+            self.doctor_codegen_section(
+                repo.clone(),
+                base.clone(),
+                head.clone(),
+                changed_files.clone(),
+            ),
+            self.doctor_inspect_size_section(
+                repo.clone(),
+                base.clone(),
+                head.clone(),
+                changed_files.clone(),
+            ),
+            self.doctor_proto_section(
+                repo.clone(),
+                base.clone(),
+                head.clone(),
+                changed_files.clone(),
+            ),
+            self.doctor_iac_section(repo, base, head, changed_files),
+        ];
 
         let has_blocked = sections
             .iter()
@@ -553,6 +475,201 @@ impl Repoctl {
             has_errors,
             sections,
         }
+    }
+
+    fn doctor_graph_section(
+        &self,
+        repo: Option<PathBuf>,
+        changed_files: Vec<RepoRelativePath>,
+    ) -> DoctorSection {
+        doctor_section(
+            "graph",
+            self.validate_graph(GraphValidateRequest {
+                repo,
+                changed_files,
+                mode: ValidationMode::Metadata,
+            })
+            .map(|report| (report.diagnostics, "graph metadata validation".to_string())),
+        )
+    }
+
+    fn doctor_affected_section(
+        &self,
+        repo: Option<PathBuf>,
+        base: Option<String>,
+        head: Option<String>,
+        changed_files: Vec<RepoRelativePath>,
+        tasks: Vec<TaskName>,
+    ) -> DoctorSection {
+        doctor_section(
+            "affected",
+            self.affected(AffectedRequest {
+                repo,
+                base,
+                head,
+                changed_files,
+                tasks,
+            })
+            .map(|report| {
+                (
+                    report.diagnostics,
+                    format!(
+                        "{} affected projects, {} tasks",
+                        report.directly_affected.len() + report.transitively_affected.len(),
+                        report.tasks.len()
+                    ),
+                )
+            }),
+        )
+    }
+
+    fn doctor_skills_section(&self, repo: Option<PathBuf>) -> DoctorSection {
+        doctor_section(
+            "skills",
+            self.skills()
+                .check(SkillsFacadeRequest {
+                    repo,
+                    sync: false,
+                    dry_run: false,
+                })
+                .map(|report| {
+                    (
+                        report.diagnostics,
+                        format!("{} skill files drifted", report.diffs.len()),
+                    )
+                }),
+        )
+    }
+
+    fn doctor_hygiene_section(&self, repo: Option<PathBuf>) -> DoctorSection {
+        doctor_section(
+            "hygiene",
+            self.hygiene_check(HygieneCheckRequest { repo })
+                .map(|report| {
+                    let diagnostics = report
+                        .diagnostics
+                        .into_iter()
+                        .filter(is_doctor_actionable_hygiene_diagnostic)
+                        .collect::<Vec<_>>();
+                    (diagnostics, "repository metadata leakage".to_string())
+                }),
+        )
+    }
+
+    fn doctor_codegen_section(
+        &self,
+        repo: Option<PathBuf>,
+        base: Option<String>,
+        head: Option<String>,
+        changed_files: Vec<RepoRelativePath>,
+    ) -> DoctorSection {
+        doctor_section(
+            "codegen",
+            self.codegen_check(CodegenCheckRequest {
+                repo,
+                base,
+                head,
+                changed_files,
+            })
+            .map(|report| (report.diagnostics, "generated-code policy".to_string())),
+        )
+    }
+
+    fn doctor_inspect_size_section(
+        &self,
+        repo: Option<PathBuf>,
+        base: Option<String>,
+        head: Option<String>,
+        changed_files: Vec<RepoRelativePath>,
+    ) -> DoctorSection {
+        let has_change_scope = !changed_files.is_empty() || (base.is_some() && head.is_some());
+        if !has_change_scope {
+            return DoctorSection {
+                name: "inspect-size".to_string(),
+                status: DoctorStatus::Ok,
+                summary: "skipped; pass --base/--head or --changed-file to inspect changed code \
+                          size"
+                    .to_string(),
+                diagnostics: Vec::new(),
+            };
+        }
+        doctor_section(
+            "inspect-size",
+            self.inspect_code_size(CodeSizeInspectionRequest {
+                repo,
+                scope: CodeSizeScope::Changed,
+                base,
+                head,
+                changed_files,
+                include_transitive: false,
+                languages: Vec::new(),
+                rules: Vec::new(),
+                fail_on: InspectionFailOn::Never,
+            })
+            .map(|report| {
+                let mut diagnostics = report.diagnostics;
+                diagnostics.extend(report.findings.into_iter().map(|finding| {
+                    Diagnostic::warning("inspect.code_size.finding", finding.message)
+                        .with_path(finding.path.to_string())
+                }));
+                (
+                    diagnostics,
+                    format!("{} findings", report.summary.finding_count),
+                )
+            }),
+        )
+    }
+
+    fn doctor_proto_section(
+        &self,
+        repo: Option<PathBuf>,
+        base: Option<String>,
+        head: Option<String>,
+        changed_files: Vec<RepoRelativePath>,
+    ) -> DoctorSection {
+        doctor_section(
+            "proto",
+            self.proto()
+                .check(ProtoFacadeRequest {
+                    repo,
+                    operation: ProtoOperation::Check,
+                    selector: None,
+                    base,
+                    head,
+                    changed_files,
+                })
+                .map(|report| (report.diagnostics, "proto routing and policy".to_string())),
+        )
+    }
+
+    fn doctor_iac_section(
+        &self,
+        repo: Option<PathBuf>,
+        base: Option<String>,
+        head: Option<String>,
+        changed_files: Vec<RepoRelativePath>,
+    ) -> DoctorSection {
+        doctor_section(
+            "iac",
+            self.iac()
+                .plan(IacFacadeRequest {
+                    repo,
+                    affected: true,
+                    project: None,
+                    env: Some("staging".to_string()),
+                    core: false,
+                    base,
+                    head,
+                    changed_files,
+                    dry_run: true,
+                })
+                .map(|report| {
+                    (
+                        report.diagnostics,
+                        format!("{} dry-run preview commands", report.commands.len()),
+                    )
+                }),
+        )
     }
 
     /// Returns the skills facade.
@@ -682,6 +799,19 @@ fn doctor_section(
     }
 }
 
+fn is_doctor_actionable_hygiene_diagnostic(diagnostic: &Diagnostic) -> bool {
+    if diagnostic.code.as_ref() != "adoption.hygiene.generated_artifact" {
+        return true;
+    }
+    diagnostic.source.as_ref().is_some_and(|source| {
+        source
+            .path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| matches!(name, ".git" | ".github"))
+    })
+}
+
 fn diagnostics_from_error(error: RepoctlError) -> Vec<Diagnostic> {
     match error {
         RepoctlError::Diagnostic { diagnostic } => vec![*diagnostic],
@@ -738,10 +868,13 @@ fn locate_repo_path(start: Option<&Path>) -> Result<PathBuf, RepoctlError> {
             return Ok(current);
         }
         if !current.pop() {
-            return Err(RepoctlError::diagnostic(Diagnostic::error(
-                "repo.locate",
-                "could not find repo.yaml from the requested path",
-            )));
+            return Err(RepoctlError::diagnostic(
+                Diagnostic::error(
+                    "repo.locate",
+                    "could not find repo.yaml from the requested path",
+                )
+                .with_help("run this command from a repoctl-managed repository or pass --repo"),
+            ));
         }
     }
 }
@@ -2491,6 +2624,83 @@ mod tests {
                     .source
                     .as_ref()
                     .is_some_and(|source| source.path.as_ref() == ".git"))
+        );
+    }
+
+    #[test]
+    fn test_should_not_report_workspace_generated_dirs_in_doctor_hygiene() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_fixture(temp.path(), None);
+        fs::create_dir_all(temp.path().join("apps/catalog/frontend/node_modules"))
+            .expect("node_modules dir");
+        fs::create_dir_all(temp.path().join("apps/catalog/frontend/dist")).expect("dist dir");
+        let facade = Repoctl::with_default_adapters().expect("facade");
+
+        let report = facade.doctor(DoctorRequest {
+            repo: Some(temp.path().to_path_buf()),
+            base: None,
+            head: None,
+            changed_files: Vec::new(),
+            tasks: Vec::new(),
+            agent: true,
+        });
+
+        let hygiene = report
+            .sections
+            .iter()
+            .find(|section| section.name == "hygiene")
+            .expect("hygiene section");
+        assert!(hygiene.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_should_skip_doctor_code_size_without_change_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_fixture(temp.path(), None);
+        let facade = Repoctl::with_default_adapters().expect("facade");
+
+        let report = facade.doctor(DoctorRequest {
+            repo: Some(temp.path().to_path_buf()),
+            base: None,
+            head: None,
+            changed_files: Vec::new(),
+            tasks: Vec::new(),
+            agent: true,
+        });
+
+        let inspect_size = report
+            .sections
+            .iter()
+            .find(|section| section.name == "inspect-size")
+            .expect("inspect-size section");
+        assert_eq!(inspect_size.status, DoctorStatus::Ok);
+        assert!(inspect_size.diagnostics.is_empty());
+        assert!(inspect_size.summary.contains("skipped"));
+    }
+
+    #[test]
+    fn test_should_report_missing_repo_manifest_once_for_doctor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let facade = Repoctl::with_default_adapters().expect("facade");
+
+        let report = facade.doctor(DoctorRequest {
+            repo: Some(temp.path().to_path_buf()),
+            base: None,
+            head: None,
+            changed_files: Vec::new(),
+            tasks: Vec::new(),
+            agent: true,
+        });
+
+        assert!(!report.command_succeeded);
+        assert_eq!(report.status, DoctorStatus::Blocked);
+        assert_eq!(report.sections.len(), 1);
+        assert_eq!(report.sections[0].name, "repo");
+        assert!(
+            report.sections[0]
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_ref() == "repo.locate")
         );
     }
 

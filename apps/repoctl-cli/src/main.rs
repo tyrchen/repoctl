@@ -2069,24 +2069,86 @@ fn render_doctor_agent(report: &DoctorReport) -> Result<(), RepoctlError> {
     if diagnostics.is_empty() {
         return write_stdout("repoctl doctor: clean\n");
     }
-    let mut output = String::new();
+    write_stdout(&format_doctor_agent_diagnostics(&diagnostics))
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct AgentDiagnosticKey {
+    section: String,
+    severity: String,
+    code: String,
+    help: Option<String>,
+}
+
+#[derive(Debug)]
+struct AgentDiagnosticGroup<'a> {
+    count: usize,
+    first: &'a Diagnostic,
+    paths: Vec<String>,
+}
+
+fn format_doctor_agent_diagnostics(diagnostics: &[(&str, &Diagnostic)]) -> String {
+    let mut groups: BTreeMap<AgentDiagnosticKey, AgentDiagnosticGroup<'_>> = BTreeMap::new();
     for (section, diagnostic) in diagnostics {
-        let _ = writeln!(
-            output,
-            "{}: {}: {}",
-            section,
-            severity_label(&diagnostic.severity),
-            diagnostic.message
-        );
-        if let Some(source) = &diagnostic.source {
-            let _ = writeln!(output, "  path: {}", source.path);
+        let key = AgentDiagnosticKey {
+            section: (*section).to_string(),
+            severity: severity_label(&diagnostic.severity).to_string(),
+            code: diagnostic.code.to_string(),
+            help: diagnostic.help.as_ref().map(ToString::to_string),
+        };
+        let path = diagnostic
+            .source
+            .as_ref()
+            .map(|source| source.path.to_string());
+        groups
+            .entry(key)
+            .and_modify(|group| {
+                group.count += 1;
+                if let Some(path) = &path
+                    && group.paths.len() < 5
+                    && !group.paths.contains(path)
+                {
+                    group.paths.push(path.clone());
+                }
+            })
+            .or_insert_with(|| AgentDiagnosticGroup {
+                count: 1,
+                first: diagnostic,
+                paths: path.into_iter().collect(),
+            });
+    }
+
+    let mut output = String::new();
+    for (key, group) in groups {
+        if group.count == 1 {
+            let _ = writeln!(
+                output,
+                "{}: {}: {}",
+                key.section, key.severity, group.first.message
+            );
+        } else {
+            let _ = writeln!(
+                output,
+                "{}: {}: {} diagnostics with code `{}`",
+                key.section, key.severity, group.count, key.code
+            );
         }
-        let _ = writeln!(output, "  code: {}", diagnostic.code);
-        if let Some(help) = &diagnostic.help {
+        if !group.paths.is_empty() {
+            let _ = writeln!(output, "  paths:");
+            for path in &group.paths {
+                let _ = writeln!(output, "    - {path}");
+            }
+            if group.count > group.paths.len() {
+                let remaining = group.count - group.paths.len();
+                let _ = writeln!(output, "    - ... {remaining} more");
+            }
+        }
+        let _ = writeln!(output, "  code: {}", key.code);
+        if let Some(help) = &key.help {
             let _ = writeln!(output, "  help: {help}");
         }
     }
-    write_stdout(&output)
+    output
 }
 
 fn doctor_status_label(status: &DoctorStatus) -> &'static str {
@@ -3245,6 +3307,25 @@ mod tests {
         assert!(output.contains("code: template.source.invalid"));
         assert!(output.contains("path: templates/app/template.yaml"));
         assert!(output.contains("help: use builtin:<name> or local:<path>"));
+    }
+
+    #[test]
+    fn test_should_group_repeated_doctor_agent_diagnostics() {
+        let first = Diagnostic::error("skills.out_of_sync", "skill `a` is out of sync")
+            .with_path(".agents/skills/repoctl/SKILL.md")
+            .with_help("run repoctl skills sync");
+        let second = Diagnostic::error("skills.out_of_sync", "skill `b` is out of sync")
+            .with_path(".claude/skills/repoctl/SKILL.md")
+            .with_help("run repoctl skills sync");
+
+        let output = format_doctor_agent_diagnostics(&[("skills", &first), ("skills", &second)]);
+
+        assert!(output.contains("skills: error: 2 diagnostics with code `skills.out_of_sync`"));
+        assert!(output.contains("paths:"));
+        assert!(output.contains(".agents/skills/repoctl/SKILL.md"));
+        assert!(output.contains(".claude/skills/repoctl/SKILL.md"));
+        assert!(output.contains("help: run repoctl skills sync"));
+        assert!(!output.contains("skill `a` is out of sync"));
     }
 
     #[test]
