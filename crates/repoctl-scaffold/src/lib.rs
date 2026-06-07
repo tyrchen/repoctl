@@ -150,7 +150,11 @@ impl ScaffoldService {
                                 "skills.out_of_sync",
                                 format!("skill `{}` is out of sync", operation.path),
                             )
-                            .with_path(operation.path.as_str()),
+                            .with_path(operation.path.as_str())
+                            .with_help(
+                                "review with `repoctl skills diff`; refresh with `repoctl skills \
+                                 sync`",
+                            ),
                         );
                     }
                 }
@@ -165,8 +169,11 @@ impl ScaffoldService {
                             "skills.missing",
                             format!("skill `{}` is missing", operation.path),
                         )
-                        .with_path(operation.path.as_str()),
-                    )
+                        .with_path(operation.path.as_str())
+                        .with_help(
+                            "review with `repoctl skills diff`; refresh with `repoctl skills sync`",
+                        ),
+                    );
                 }
                 (None, _) => {}
             }
