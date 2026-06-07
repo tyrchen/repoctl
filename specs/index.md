@@ -25,3 +25,4 @@
 ## repoctl v0.6
 
 - [Agent Verification Budget Spec](repoctl-v0.6-agent-verification-budget-spec.md)
+- [Doctor And Agent Handoff Spec](repoctl-v0.6-doctor-agent-handoff-spec.md)

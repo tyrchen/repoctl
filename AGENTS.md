@@ -29,6 +29,19 @@ IMPORTANT: Never enter plan mode automatically!!! Never enter plan mode automati
   - For new automation tasks, always add a Makefile target instead of creating shell scripts
   - Keep automation consistent and discoverable
 
+### Repoctl Verification Budget
+
+- Keep repoctl out of the inner coding loop for source-only edits, formatting, lint fixes, and test fixes.
+- Use the doctor command as the routine repoctl hand-off gate:
+
+  ```bash
+  repoctl doctor --agent
+  ```
+
+- Treat other repoctl commands as specialized investigation tools, not a mandatory command sequence.
+- Keep doctor output focused on diagnostics that require edits. If unrelated branch changes widen diagnostics, state that and switch to explicit project-scoped verification outside the root agent guide.
+- Report skipped heavyweight gates and why they were not relevant.
+
 ## Documentation
 
 For specs, explore ./specs directory and put it to the right place, name the spec file as {feature-name}-{type}.md and update index.md accordingly. type can be prd, design, impl-plan, verification-plan, review, etc.

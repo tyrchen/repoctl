@@ -391,6 +391,170 @@ impl Repoctl {
         self.runner.provider_capabilities(&request)
     }
 
+    /// Runs read-only repository health checks.
+    pub fn doctor(&self, request: DoctorRequest) -> DoctorReport {
+        let mut sections = Vec::new();
+        let repo = request.repo.clone();
+        let changed_files = request.changed_files.clone();
+        let base = request.base.clone();
+        let head = request.head.clone();
+        let tasks = if request.tasks.is_empty() {
+            default_doctor_tasks()
+        } else {
+            request.tasks.clone()
+        };
+
+        sections.push(doctor_section(
+            "graph",
+            self.validate_graph(GraphValidateRequest {
+                repo: repo.clone(),
+                changed_files: changed_files.clone(),
+                mode: ValidationMode::Metadata,
+            })
+            .map(|report| (report.diagnostics, "graph metadata validation".to_string())),
+        ));
+        sections.push(doctor_section(
+            "affected",
+            self.affected(AffectedRequest {
+                repo: repo.clone(),
+                base: base.clone(),
+                head: head.clone(),
+                changed_files: changed_files.clone(),
+                tasks: tasks.clone(),
+            })
+            .map(|report| {
+                (
+                    report.diagnostics,
+                    format!(
+                        "{} affected projects, {} tasks",
+                        report.directly_affected.len() + report.transitively_affected.len(),
+                        report.tasks.len()
+                    ),
+                )
+            }),
+        ));
+        sections.push(doctor_section(
+            "skills",
+            self.skills()
+                .check(SkillsFacadeRequest {
+                    repo: repo.clone(),
+                    sync: false,
+                    dry_run: false,
+                })
+                .map(|report| {
+                    (
+                        report.diagnostics,
+                        format!("{} skill files drifted", report.diffs.len()),
+                    )
+                }),
+        ));
+        sections.push(doctor_section(
+            "hygiene",
+            self.hygiene_check(HygieneCheckRequest { repo: repo.clone() })
+                .map(|report| {
+                    (
+                        report.diagnostics,
+                        format!("{} cleanable operations", report.operations.len()),
+                    )
+                }),
+        ));
+        sections.push(doctor_section(
+            "codegen",
+            self.codegen_check(CodegenCheckRequest {
+                repo: repo.clone(),
+                base: base.clone(),
+                head: head.clone(),
+                changed_files: changed_files.clone(),
+            })
+            .map(|report| (report.diagnostics, "generated-code policy".to_string())),
+        ));
+        sections.push(doctor_section(
+            "inspect-size",
+            self.inspect_code_size(CodeSizeInspectionRequest {
+                repo: repo.clone(),
+                scope: CodeSizeScope::Changed,
+                base: base.clone(),
+                head: head.clone(),
+                changed_files: changed_files.clone(),
+                include_transitive: false,
+                languages: Vec::new(),
+                rules: Vec::new(),
+                fail_on: InspectionFailOn::Never,
+            })
+            .map(|report| {
+                let mut diagnostics = report.diagnostics;
+                diagnostics.extend(report.findings.into_iter().map(|finding| {
+                    Diagnostic::warning("inspect.code_size.finding", finding.message)
+                        .with_path(finding.path.to_string())
+                }));
+                (
+                    diagnostics,
+                    format!("{} findings", report.summary.finding_count),
+                )
+            }),
+        ));
+        sections.push(doctor_section(
+            "proto",
+            self.proto()
+                .check(ProtoFacadeRequest {
+                    repo: repo.clone(),
+                    operation: ProtoOperation::Check,
+                    selector: None,
+                    base: base.clone(),
+                    head: head.clone(),
+                    changed_files: changed_files.clone(),
+                })
+                .map(|report| (report.diagnostics, "proto routing and policy".to_string())),
+        ));
+        sections.push(doctor_section(
+            "iac",
+            self.iac()
+                .plan(IacFacadeRequest {
+                    repo: repo.clone(),
+                    affected: true,
+                    project: None,
+                    env: Some("staging".to_string()),
+                    core: false,
+                    base: base.clone(),
+                    head,
+                    changed_files,
+                    dry_run: true,
+                })
+                .map(|report| {
+                    (
+                        report.diagnostics,
+                        format!("{} dry-run preview commands", report.commands.len()),
+                    )
+                }),
+        ));
+
+        let has_blocked = sections
+            .iter()
+            .any(|section| section.status == DoctorStatus::Blocked);
+        let has_errors = sections.iter().any(|section| {
+            section
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error)
+        });
+        let has_diagnostics = sections
+            .iter()
+            .any(|section| !section.diagnostics.is_empty());
+        let status = if has_blocked {
+            DoctorStatus::Blocked
+        } else if has_errors || has_diagnostics {
+            DoctorStatus::Diagnostics
+        } else {
+            DoctorStatus::Ok
+        };
+        DoctorReport {
+            status,
+            command_succeeded: !has_blocked,
+            has_errors,
+            sections,
+        }
+    }
+
     /// Returns the skills facade.
     pub fn skills(&self) -> &SkillsFacade {
         &self.skills
@@ -460,6 +624,11 @@ impl SkillsFacade {
         ScaffoldService::with_default_adapters().skills(&request)
     }
 
+    /// Computes generated skill drift.
+    pub fn diff(&self, request: SkillsFacadeRequest) -> Result<SkillsFacadeReport, RepoctlError> {
+        ScaffoldService::with_default_adapters().skills(&request)
+    }
+
     /// Synchronizes generated skills.
     pub fn sync(
         &self,
@@ -477,6 +646,60 @@ fn structural_discovery() -> DiscoveryService {
         Arc::new(repoctl_core::YamlManifestParser),
         Arc::new(DefaultGraphBuilder::new(Vec::new())),
     )
+}
+
+fn default_doctor_tasks() -> Vec<TaskName> {
+    ["check", "test", "build"]
+        .into_iter()
+        .filter_map(|task| TaskName::new(task).ok())
+        .collect()
+}
+
+fn doctor_section(
+    name: &str,
+    result: Result<(Vec<Diagnostic>, String), RepoctlError>,
+) -> DoctorSection {
+    match result {
+        Ok((diagnostics, summary)) => {
+            let status = if diagnostics.is_empty() {
+                DoctorStatus::Ok
+            } else {
+                DoctorStatus::Diagnostics
+            };
+            DoctorSection {
+                name: name.to_string(),
+                status,
+                summary,
+                diagnostics,
+            }
+        }
+        Err(error) => DoctorSection {
+            name: name.to_string(),
+            status: DoctorStatus::Blocked,
+            summary: "section could not run".to_string(),
+            diagnostics: diagnostics_from_error(error),
+        },
+    }
+}
+
+fn diagnostics_from_error(error: RepoctlError) -> Vec<Diagnostic> {
+    match error {
+        RepoctlError::Diagnostic { diagnostic } => vec![*diagnostic],
+        RepoctlError::Diagnostics { diagnostics } => diagnostics,
+        RepoctlError::Io { path, source } => vec![
+            Diagnostic::error(
+                "doctor.section.io",
+                format!("I/O error at {path}: {source}"),
+            )
+            .with_path(path.to_string()),
+        ],
+        RepoctlError::Environment(message) => {
+            vec![Diagnostic::error("doctor.section.environment", message)]
+        }
+        RepoctlError::Internal(message) => {
+            vec![Diagnostic::error("doctor.section.internal", message)]
+        }
+    }
 }
 
 const ADOPTION_EXCLUDED_DIRS: &[&str] = &[
@@ -1964,6 +2187,9 @@ fn collect_hygiene(
         let rel_text = rel.to_string_lossy().replace('\\', "/");
         let nested_root = !rel_text.is_empty();
         if path.is_dir() && HYGIENE_GENERATED_DIRS.contains(&name) && nested_root {
+            if name == ".git" && rel_text == ".git" {
+                continue;
+            }
             if name == ".github" && rel_text == ".github" {
                 collect_hygiene(root, &path, cleanable, diagnostics, operations)?;
                 continue;
@@ -2187,10 +2413,11 @@ mod tests {
     use super::{
         AdoptionApplyRequest, AdoptionCiMode, AdoptionOutputFormat, AdoptionPlanRequest,
         AiContextRequest, CodegenCheckRequest, DependencyRewriteMode, DiscoverRequest,
-        GraphValidateRequest, HygieneCheckRequest, IacFacadeRequest, OpsPlanRequest,
-        OpsReconcileRequest, OpsVerifyRequest, PrSummaryRequest, ProjectName, ProtoFacadeRequest,
-        ProtoOperation, ProviderCapabilityRequest, RepoRelativePath, Repoctl, TaskName,
-        TaskRunRequest, TemplateListRequest, TemplateRenderRequest, TemplateSource, ValidationMode,
+        DoctorRequest, DoctorStatus, GraphValidateRequest, HygieneCheckRequest, IacFacadeRequest,
+        OpsPlanRequest, OpsReconcileRequest, OpsVerifyRequest, PrSummaryRequest, ProjectName,
+        ProtoFacadeRequest, ProtoOperation, ProviderCapabilityRequest, RepoRelativePath, Repoctl,
+        TaskName, TaskRunRequest, TemplateListRequest, TemplateRenderRequest, TemplateSource,
+        ValidationMode,
     };
 
     #[test]
@@ -2223,6 +2450,47 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code.as_ref() == "policy.cross_app_dependency")
+        );
+    }
+
+    #[test]
+    fn test_should_aggregate_doctor_sections_without_reporting_root_git() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_fixture(temp.path(), None);
+        fs::create_dir_all(temp.path().join(".git")).expect("git dir");
+        fs::write(
+            temp.path().join("apps/catalog/src.rs"),
+            "pub fn catalog() {}\n",
+        )
+        .expect("source");
+        let facade = Repoctl::with_default_adapters().expect("facade");
+
+        let report = facade.doctor(DoctorRequest {
+            repo: Some(temp.path().to_path_buf()),
+            base: None,
+            head: None,
+            changed_files: vec![RepoRelativePath::new("apps/catalog/src.rs").expect("path")],
+            tasks: Vec::new(),
+            agent: true,
+        });
+
+        assert!(report.command_succeeded);
+        assert_eq!(report.status, DoctorStatus::Diagnostics);
+        assert!(
+            report
+                .sections
+                .iter()
+                .any(|section| section.name == "skills")
+        );
+        assert!(
+            !report
+                .sections
+                .iter()
+                .flat_map(|section| &section.diagnostics)
+                .any(|diagnostic| diagnostic
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.path.as_ref() == ".git"))
         );
     }
 
