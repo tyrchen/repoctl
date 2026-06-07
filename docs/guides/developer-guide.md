@@ -155,28 +155,31 @@ For Chinese docs, write naturally for Chinese readers. Do not produce sentence-b
 
 Before publishing, verify that publishable workspace dependencies include both local `path` and crates.io `version` requirements. A local path-only dependency will fail packaging because Cargo strips path information for crates.io.
 
-Run package dry-runs in dependency order when changing publish metadata:
+Run package dry-runs in dependency order when changing publish metadata. Do not use a workspace
+publish command for this release chain; publishable crates depend on freshly uploaded sibling
+crates, and explicit package order makes partial release recovery straightforward.
 
 ```bash
 cargo publish -p repoctl-core --dry-run --allow-dirty
 cargo publish -p repoctl-engine --dry-run --allow-dirty
-cargo publish -p repoctl-scaffold --dry-run --allow-dirty
 cargo publish -p repoctl-runner --dry-run --allow-dirty
+cargo publish -p repoctl-scaffold --dry-run --allow-dirty
 cargo publish -p repoctl-inspect --dry-run --allow-dirty
 cargo publish -p repoctl --dry-run --allow-dirty
 cargo publish -p repoctl-cli --dry-run --allow-dirty
 ```
 
-The repository root also supports the default package dry-run:
+The Makefile exposes the same ordered dry-run:
 
 ```bash
-cargo publish --dry-run --allow-dirty
+make publish-dry-run
 ```
 
 Release automation is exposed through the Makefile:
 
 ```bash
 make release
+make publish
 ```
 
 Use it only when intentionally cutting a release.

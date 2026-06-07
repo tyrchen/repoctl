@@ -1,3 +1,5 @@
+PUBLISH_CRATES := repoctl-core repoctl-engine repoctl-runner repoctl-scaffold repoctl-inspect repoctl repoctl-cli
+
 build:
 	@cargo build
 
@@ -27,7 +29,19 @@ release:
 	@git push origin master
 	@cargo release push --execute
 
+publish-dry-run:
+	@set -e; \
+	for crate in $(PUBLISH_CRATES); do \
+		cargo publish -p "$$crate" --dry-run --allow-dirty; \
+	done
+
+publish:
+	@set -e; \
+	for crate in $(PUBLISH_CRATES); do \
+		cargo publish -p "$$crate"; \
+	done
+
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test check-agent-sync release update-submodule
+.PHONY: build test check-agent-sync release publish-dry-run publish update-submodule

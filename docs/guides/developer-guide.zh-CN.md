@@ -156,22 +156,30 @@ mod tests {
 
 发布前要确认 workspace 内部依赖既有本地 `path`，也有 crates.io `version`。Cargo 发布时会移除 `path`，只留下版本约束；只有 path 没有 version 的依赖不能发布。
 
-发布 dry-run 按依赖顺序跑：
+发布 dry-run 按依赖顺序跑。这个 workspace 不要用 workspace publish 一次性发布；后面的包依赖刚上传的
+workspace 内部包，逐个发布更容易从中断状态恢复。
 
 ```bash
 cargo publish -p repoctl-core --dry-run --allow-dirty
 cargo publish -p repoctl-engine --dry-run --allow-dirty
-cargo publish -p repoctl-scaffold --dry-run --allow-dirty
 cargo publish -p repoctl-runner --dry-run --allow-dirty
+cargo publish -p repoctl-scaffold --dry-run --allow-dirty
 cargo publish -p repoctl-inspect --dry-run --allow-dirty
 cargo publish -p repoctl --dry-run --allow-dirty
 cargo publish -p repoctl-cli --dry-run --allow-dirty
+```
+
+Makefile 里也有同样顺序的 dry-run：
+
+```bash
+make publish-dry-run
 ```
 
 发布命令在 Makefile 里：
 
 ```bash
 make release
+make publish
 ```
 
 只有在明确要发版时才使用。
