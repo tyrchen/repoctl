@@ -32,13 +32,14 @@ IMPORTANT: Never enter plan mode automatically!!! Never enter plan mode automati
 ### Repoctl Verification Budget
 
 - Keep repoctl out of the inner coding loop for source-only edits, formatting, lint fixes, and test fixes.
-- Treat common repoctl commands as reference commands, not a mandatory command sequence.
-- Run repoctl validation once at todo-batch or goal completion with the smallest surface that answers the verification question.
-- Run `repoctl graph validate` before editing only when graph inputs may change: `repo.yaml`, `project.yaml`, workspaces, task wiring, generated-code policy, proto ownership, CI routing, templates, skills, or cross-project dependency boundaries.
-- Run `repoctl affected` once per todo batch when impact, CI routing, PR readiness, or verification selection matters.
-- Use at most one affected dry-run when task selection is unclear or expensive. Do not run per-project/per-task dry-run matrices.
-- Run `repoctl skills check` only when agent instructions, skills, skill sources, or sync behavior changed.
-- If unrelated branch changes widen `repoctl affected`, state that and switch to explicit project-scoped verification.
+- Use the doctor command as the routine repoctl hand-off gate:
+
+  ```bash
+  repoctl doctor --agent
+  ```
+
+- Treat other repoctl commands as specialized investigation tools, not a mandatory command sequence.
+- Keep doctor output focused on diagnostics that require edits. If unrelated branch changes widen diagnostics, state that and switch to explicit project-scoped verification outside the root agent guide.
 - Report skipped heavyweight gates and why they were not relevant.
 
 ## Documentation

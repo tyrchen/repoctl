@@ -2649,6 +2649,65 @@ pub struct ProviderCapabilityReport {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Request for repository health checks.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
+    /// Explicit changed files.
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Requested task names.
+    pub tasks: Vec<TaskName>,
+    /// Whether to keep only agent-actionable output.
+    pub agent: bool,
+}
+
+/// Overall doctor status.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DoctorStatus {
+    /// No actionable diagnostics were found.
+    #[default]
+    Ok,
+    /// Repo diagnostics were found.
+    Diagnostics,
+    /// A repoctl execution failure prevented at least one section from running.
+    Blocked,
+}
+
+/// One doctor section.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorSection {
+    /// Stable section name.
+    pub name: String,
+    /// Section status.
+    pub status: DoctorStatus,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Diagnostics requiring attention.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Doctor report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorReport {
+    /// Overall status.
+    pub status: DoctorStatus,
+    /// Whether repoctl was able to complete the doctor run.
+    pub command_succeeded: bool,
+    /// Whether any error-severity diagnostics were found.
+    pub has_errors: bool,
+    /// Section reports.
+    pub sections: Vec<DoctorSection>,
+}
+
 /// Local operations session journal.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2767,6 +2826,21 @@ pub struct SkillsFacadeRequest {
 pub struct SkillsFacadeReport {
     /// Diagnostics.
     pub diagnostics: Vec<Diagnostic>,
+    /// Changed generated skill files.
+    #[serde(default)]
+    pub diffs: Vec<SkillFileDiff>,
+}
+
+/// Diff for one generated skill file.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillFileDiff {
+    /// Repo-relative skill path.
+    pub path: RepoRelativePath,
+    /// Whether the current file exists.
+    pub current_exists: bool,
+    /// Compact line-level diff.
+    pub diff: String,
 }
 
 /// Validates project path conventions for the supported kinds.

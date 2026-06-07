@@ -22,18 +22,18 @@ use repoctl::{
     BoundaryLintRequest, CiFallback, CiMatrixReport, CiMatrixRequest, CiProvider, CiWorkflowReport,
     CiWorkflowRequest, CodeLanguage, CodeSizeFinding, CodeSizeInspectionReport,
     CodeSizeInspectionRequest, CodeSizeInspectionSummary, CodeSizeRuleKind, CodeSizeScope,
-    CodegenCheckReport, CodegenCheckRequest, DependencyRewriteMode, Diagnostic, ExplainReport,
-    ExplainRequest, FileOperation, GraphPrintReport, GraphPrintRequest, GraphValidateRequest,
-    HygieneCheckRequest, HygieneCleanRequest, HygieneReport, IacFacadeReport, IacFacadeRequest,
-    IacProvider, InitPlan, InitProfile, InitRequest, InspectionFailOn, NewProjectRequest,
-    OpsJournalAction, OpsJournalReport, OpsJournalRequest, OpsPlan, OpsPlanRequest,
-    OpsReconcileReport, OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest, OwnerHandle,
-    PrSummary, PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName, ProtoFacadeReport,
-    ProtoFacadeRequest, ProtoOperation, ProtoPackageName, ProviderCapabilityReport,
-    ProviderCapabilityRequest, RenderPlan, RepoLayout, RepoName, RepoRelativePath, Repoctl,
-    RepoctlError, Severity, SkillsFacadeRequest, TaskName, TaskRunReport, TaskRunRequest,
-    TemplateListReport, TemplateListRequest, TemplateRenderRequest, TemplateSource, ValidationMode,
-    ValidationReport, WorkspaceName,
+    CodegenCheckReport, CodegenCheckRequest, DependencyRewriteMode, Diagnostic, DoctorReport,
+    DoctorRequest, DoctorStatus, ExplainReport, ExplainRequest, FileOperation, GraphPrintReport,
+    GraphPrintRequest, GraphValidateRequest, HygieneCheckRequest, HygieneCleanRequest,
+    HygieneReport, IacFacadeReport, IacFacadeRequest, IacProvider, InitPlan, InitProfile,
+    InitRequest, InspectionFailOn, NewProjectRequest, OpsJournalAction, OpsJournalReport,
+    OpsJournalRequest, OpsPlan, OpsPlanRequest, OpsReconcileReport, OpsReconcileRequest,
+    OpsVerifyReport, OpsVerifyRequest, OwnerHandle, PrSummary, PrSummaryRequest, ProcessCommand,
+    ProjectKind, ProjectName, ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation,
+    ProtoPackageName, ProviderCapabilityReport, ProviderCapabilityRequest, RenderPlan, RepoLayout,
+    RepoName, RepoRelativePath, Repoctl, RepoctlError, Severity, SkillsFacadeRequest, TaskName,
+    TaskRunReport, TaskRunRequest, TemplateListReport, TemplateListRequest, TemplateRenderRequest,
+    TemplateSource, ValidationMode, ValidationReport, WorkspaceName,
 };
 
 mod interactive;
@@ -85,6 +85,30 @@ enum Command {
     Graph {
         #[command(subcommand)]
         command: GraphCommand,
+    },
+    /// Run read-only repository health checks.
+    Doctor {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Base git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref.
+        #[arg(long)]
+        head: Option<String>,
+        /// Explicit changed file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Comma-separated task names.
+        #[arg(long, value_delimiter = ',')]
+        tasks: Vec<String>,
+        /// Print only diagnostics that need edits.
+        #[arg(long)]
+        agent: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Explain a project or graph node.
     Explain {
@@ -510,9 +534,9 @@ enum InspectCommand {
         /// Repository root or path inside the repo.
         #[arg(long)]
         repo: Option<PathBuf>,
-        /// Scan scope.
-        #[arg(long, value_enum, default_value_t = CodeSizeScopeArg::All)]
-        scope: CodeSizeScopeArg,
+        /// Scan scope. Defaults to changed when --changed-file is provided, otherwise all.
+        #[arg(long, value_enum)]
+        scope: Option<CodeSizeScopeArg>,
         /// Base git ref for changed or affected scope.
         #[arg(long)]
         base: Option<String>,
@@ -806,6 +830,15 @@ enum SkillsCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
+    /// Show generated skill drift.
+    Diff {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
     /// Synchronize generated skills.
     Sync {
         /// Repository root or path inside the repo.
@@ -1025,6 +1058,26 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 Ok(ExitCode::SUCCESS)
             }
         },
+        Command::Doctor {
+            repo,
+            base,
+            head,
+            changed_files,
+            tasks,
+            agent,
+            format,
+        } => {
+            let report = repoctl.doctor(DoctorRequest {
+                repo,
+                base,
+                head,
+                changed_files: parse_changed_files(changed_files)?,
+                tasks: parse_tasks_or_default(tasks)?,
+                agent,
+            });
+            render_doctor_report(&report, format, agent)?;
+            Ok(exit_for_doctor_report(&report))
+        }
         Command::Explain {
             selector,
             repo,
@@ -1284,12 +1337,23 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 format,
             } => {
                 let fail_on = InspectionFailOn::from(fail_on);
+                let parsed_changed_files = parse_changed_files(changed_files)?;
+                let effective_scope = scope.map_or_else(
+                    || {
+                        if parsed_changed_files.is_empty() {
+                            CodeSizeScope::All
+                        } else {
+                            CodeSizeScope::Changed
+                        }
+                    },
+                    Into::into,
+                );
                 let request = CodeSizeInspectionRequest {
                     repo,
-                    scope: scope.into(),
+                    scope: effective_scope,
                     base,
                     head,
-                    changed_files: parse_changed_files(changed_files)?,
+                    changed_files: parsed_changed_files,
                     include_transitive,
                     languages: languages.into_iter().map(Into::into).collect(),
                     rules: rules.into_iter().map(Into::into).collect(),
@@ -1524,9 +1588,17 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     sync: false,
                     dry_run: false,
                 })?;
-                let validation = ValidationReport::new(report.diagnostics);
-                render_validation_report(&validation, format, "Skills are in sync.")?;
-                Ok(exit_for_diagnostics(&validation.diagnostics))
+                render_skills_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
+            }
+            SkillsCommand::Diff { repo, format } => {
+                let report = repoctl.skills().diff(SkillsFacadeRequest {
+                    repo,
+                    sync: false,
+                    dry_run: true,
+                })?;
+                render_skills_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
             }
             SkillsCommand::Sync {
                 repo,
@@ -1538,9 +1610,8 @@ fn run() -> Result<ExitCode, RepoctlError> {
                     sync: true,
                     dry_run,
                 })?;
-                let validation = ValidationReport::new(report.diagnostics);
-                render_validation_report(&validation, format, "Skills are in sync.")?;
-                Ok(exit_for_diagnostics(&validation.diagnostics))
+                render_skills_report(&report, format)?;
+                Ok(exit_for_diagnostics(&report.diagnostics))
             }
         },
     }
@@ -1685,6 +1756,18 @@ fn parse_tasks(values: Vec<String>) -> Result<Vec<TaskName>, RepoctlError> {
         .into_iter()
         .map(|value| TaskName::new(value).map_err(RepoctlError::diagnostic))
         .collect()
+}
+
+fn parse_tasks_or_default(values: Vec<String>) -> Result<Vec<TaskName>, RepoctlError> {
+    if values.is_empty() {
+        parse_tasks(vec![
+            "check".to_string(),
+            "test".to_string(),
+            "build".to_string(),
+        ])
+    } else {
+        parse_tasks(values)
+    }
 }
 
 fn parse_projects(values: Vec<String>) -> Result<Vec<ProjectName>, RepoctlError> {
@@ -1910,6 +1993,107 @@ fn render_validation_report(
                 render_diagnostics(&report.diagnostics)
             }
         }
+    }
+}
+
+fn render_skills_report(
+    report: &repoctl::SkillsFacadeReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            if report.diagnostics.is_empty() {
+                return write_stdout("Skills are in sync.\n");
+            }
+            let mut output = String::new();
+            append_title(&mut output, "Skills");
+            append_diagnostics(&mut output, &report.diagnostics);
+            for diff in &report.diffs {
+                let _ = writeln!(output, "\n--- {}", diff.path);
+                output.push_str(&diff.diff);
+            }
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_doctor_report(
+    report: &DoctorReport,
+    format: OutputFormat,
+    agent: bool,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            if agent {
+                return render_doctor_agent(report);
+            }
+            let mut output = String::new();
+            append_title(&mut output, "Repoctl doctor");
+            let _ = writeln!(output, "Status: {}", doctor_status_label(&report.status));
+            for section in &report.sections {
+                let _ = writeln!(
+                    output,
+                    "- {} [{}]: {}",
+                    section.name,
+                    doctor_status_label(&section.status),
+                    section.summary
+                );
+            }
+            let diagnostics = report
+                .sections
+                .iter()
+                .flat_map(|section| section.diagnostics.clone())
+                .collect::<Vec<_>>();
+            append_diagnostics(&mut output, &diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
+fn render_doctor_agent(report: &DoctorReport) -> Result<(), RepoctlError> {
+    let diagnostics = report
+        .sections
+        .iter()
+        .flat_map(|section| {
+            section
+                .diagnostics
+                .iter()
+                .map(|diagnostic| (section.name.as_str(), diagnostic))
+        })
+        .filter(|(_, diagnostic)| {
+            matches!(diagnostic.severity, Severity::Warning | Severity::Error)
+        })
+        .collect::<Vec<_>>();
+    if diagnostics.is_empty() {
+        return write_stdout("repoctl doctor: clean\n");
+    }
+    let mut output = String::new();
+    for (section, diagnostic) in diagnostics {
+        let _ = writeln!(
+            output,
+            "{}: {}: {}",
+            section,
+            severity_label(&diagnostic.severity),
+            diagnostic.message
+        );
+        if let Some(source) = &diagnostic.source {
+            let _ = writeln!(output, "  path: {}", source.path);
+        }
+        let _ = writeln!(output, "  code: {}", diagnostic.code);
+        if let Some(help) = &diagnostic.help {
+            let _ = writeln!(output, "  help: {help}");
+        }
+    }
+    write_stdout(&output)
+}
+
+fn doctor_status_label(status: &DoctorStatus) -> &'static str {
+    match status {
+        DoctorStatus::Ok => "ok",
+        DoctorStatus::Diagnostics => "diagnostics",
+        DoctorStatus::Blocked => "blocked",
     }
 }
 
@@ -2993,6 +3177,14 @@ fn exit_for_provider_reports(reports: &[ProviderCapabilityReport]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn exit_for_doctor_report(report: &DoctorReport) -> ExitCode {
+    if matches!(report.status, DoctorStatus::Ok) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

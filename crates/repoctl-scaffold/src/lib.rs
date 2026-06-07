@@ -21,8 +21,8 @@ use minijinja::Environment;
 use repoctl_core::{
     Diagnostic, FileOperation, IacProvider, InitPlan, InitRequest, NewProjectRequest, OwnerHandle,
     ProjectKind, RenderPlan, RenderRequest, RenderedTemplate, RepoRelativePath, RepoRoot,
-    RepoctlError, ResolvedTemplateSource, SkillsFacadeReport, SkillsFacadeRequest, TemplateEngine,
-    TemplateListReport, TemplateListRequest, TemplateRenderRequest, TemplateSource,
+    RepoctlError, ResolvedTemplateSource, SkillFileDiff, SkillsFacadeReport, SkillsFacadeRequest,
+    TemplateEngine, TemplateListReport, TemplateListRequest, TemplateRenderRequest, TemplateSource,
     TemplateSourceResolver, TemplateSummary, YamlManifestParser, utf8_path_buf,
 };
 use serde_json::json;
@@ -132,6 +132,7 @@ impl ScaffoldService {
         let root = locate_or_current(request.repo.as_deref())?;
         let operations = skill_operations()?;
         let mut diagnostics = Vec::new();
+        let mut diffs = Vec::new();
         for operation in &operations {
             let absolute = root.join(operation.path.as_str());
             match (&operation.content, absolute.exists()) {
@@ -139,6 +140,11 @@ impl ScaffoldService {
                     let current = fs::read_to_string(absolute.as_std_path())
                         .map_err(|source| RepoctlError::io(absolute.clone(), source))?;
                     if current != *expected {
+                        diffs.push(SkillFileDiff {
+                            path: operation.path.clone(),
+                            current_exists: true,
+                            diff: compact_line_diff(&current, expected),
+                        });
                         diagnostics.push(
                             Diagnostic::error(
                                 "skills.out_of_sync",
@@ -148,21 +154,29 @@ impl ScaffoldService {
                         );
                     }
                 }
-                (Some(_), false) => diagnostics.push(
-                    Diagnostic::error(
-                        "skills.missing",
-                        format!("skill `{}` is missing", operation.path),
+                (Some(expected), false) => {
+                    diffs.push(SkillFileDiff {
+                        path: operation.path.clone(),
+                        current_exists: false,
+                        diff: compact_line_diff("", expected),
+                    });
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "skills.missing",
+                            format!("skill `{}` is missing", operation.path),
+                        )
+                        .with_path(operation.path.as_str()),
                     )
-                    .with_path(operation.path.as_str()),
-                ),
+                }
                 (None, _) => {}
             }
         }
         if request.sync && !request.dry_run {
             apply_operations(&root, &operations, false)?;
             diagnostics.clear();
+            diffs.clear();
         }
-        Ok(SkillsFacadeReport { diagnostics })
+        Ok(SkillsFacadeReport { diagnostics, diffs })
     }
 
     /// Plans and optionally applies a new project scaffold.
@@ -865,6 +879,21 @@ impl TemplateSourceResolver for DefaultTemplateSourceResolver {
                 let absolute = root.absolute.join(manifest_path.as_str());
                 let bytes = fs::read(absolute.as_std_path())
                     .map_err(|source| RepoctlError::io(absolute.clone(), source))?;
+                if let Some(schema) = template_schema(&bytes)
+                    && schema != "repoctl.template/v1"
+                {
+                    return Err(RepoctlError::diagnostic(
+                        Diagnostic::error(
+                            "template.schema.unsupported",
+                            format!("template schema `{schema}` is not renderable by repoctl"),
+                        )
+                        .with_path(manifest_path.as_str())
+                        .with_help(
+                            "use a repoctl.template/v1 template or the owning generator for this \
+                             template schema",
+                        ),
+                    ));
+                }
                 let manifest = self
                     .parser
                     .parse_template_bytes(manifest_path.as_str(), &bytes)?;
@@ -875,6 +904,15 @@ impl TemplateSourceResolver for DefaultTemplateSourceResolver {
             }
         }
     }
+}
+
+fn template_schema(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed.strip_prefix("schema:")?.trim();
+        Some(value.trim_matches('"').trim_matches('\'').to_string())
+    })
 }
 
 /// MiniJinja-backed template engine.
@@ -1055,6 +1093,37 @@ fn apply_operations(
 
 fn is_repoctl_owned_skill_path(path: &str) -> bool {
     path.starts_with(".agents/skills/") || path.starts_with(".claude/skills/")
+}
+
+fn compact_line_diff(current: &str, expected: &str) -> String {
+    let current_lines = current.lines().collect::<Vec<_>>();
+    let expected_lines = expected.lines().collect::<Vec<_>>();
+    let max_len = current_lines.len().max(expected_lines.len());
+    let mut output = String::new();
+    let mut shown = 0_usize;
+    for index in 0..max_len {
+        let current_line = current_lines.get(index).copied();
+        let expected_line = expected_lines.get(index).copied();
+        if current_line == expected_line {
+            continue;
+        }
+        if shown >= 80 {
+            output.push_str("... diff truncated ...\n");
+            break;
+        }
+        if let Some(line) = current_line {
+            output.push('-');
+            output.push_str(line);
+            output.push('\n');
+        }
+        if let Some(line) = expected_line {
+            output.push('+');
+            output.push_str(line);
+            output.push('\n');
+        }
+        shown += 1;
+    }
+    output
 }
 
 fn skill_operations() -> Result<Vec<FileOperation>, RepoctlError> {
@@ -1716,25 +1785,22 @@ This repository is an internal functional monorepo. {product} must treat `repo.y
 
 ## Repoctl Verification Budget
 
-- Treat common repoctl commands as reference commands, not a mandatory sequence.
-- Run `repoctl affected` once per todo batch when impact, CI routing, PR readiness, or verification
-  selection matters.
-- Use at most one affected dry-run when task selection is unclear or expensive; do not run
-  per-project/per-task dry-run matrices.
-- Run `repoctl skills check` only when agent instructions, skills, skill sources, or sync behavior
-  changed.
-- If unrelated branch changes widen `repoctl affected`, state that and switch to explicit
-  project-scoped verification.
+- Use the doctor command as the routine repoctl hand-off gate:
+
+  ```bash
+  repoctl doctor --agent
+  ```
+
+- Treat other repoctl commands as specialized investigation tools, not a mandatory sequence.
+- Keep doctor output focused on diagnostics that require edits. If unrelated branch changes widen
+  diagnostics, state that and switch to explicit project-scoped verification outside the root agent
+  guide.
 - Report skipped heavyweight gates and why they were not relevant.
 
-## Reference Commands
+## Routine Verification
 
 ```bash
-repoctl graph validate
-repoctl affected --base origin/main --head HEAD --tasks check,test,build
-repoctl run check --affected --dry-run
-repoctl pr summary --base origin/main --head HEAD
-repoctl skills check
+repoctl doctor --agent
 ```
 
 ## Repository Layout
@@ -2857,7 +2923,7 @@ fn iac_provider_name(provider: &IacProvider) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use repoctl_core::{InitProfile, RepoLayout, RepoName};
+    use repoctl_core::{InitProfile, RepoLayout, RepoName, RepoRoot};
 
     use super::*;
 
@@ -2948,6 +3014,7 @@ mod tests {
             })
             .expect("check");
         assert!(!report.diagnostics.is_empty());
+        assert!(!report.diffs.is_empty());
         let report = service
             .skills(&SkillsFacadeRequest {
                 repo: Some(temp.path().to_path_buf()),
@@ -2956,6 +3023,7 @@ mod tests {
             })
             .expect("sync");
         assert!(report.diagnostics.is_empty());
+        assert!(report.diffs.is_empty());
         let skill =
             fs::read_to_string(temp.path().join(".agents/skills/repoctl/SKILL.md")).expect("skill");
         assert!(skill.contains("name: \"repoctl\""));
@@ -2978,6 +3046,24 @@ mod tests {
         .expect("agent config");
         assert!(config.contains("display_name: \"Repoctl\""));
         assert!(config.contains("default_prompt:"));
+
+        fs::write(
+            temp.path().join(".agents/skills/repoctl/SKILL.md"),
+            "name: \"repoctl\"\n",
+        )
+        .expect("stale skill");
+        let report = service
+            .skills(&SkillsFacadeRequest {
+                repo: Some(temp.path().to_path_buf()),
+                sync: false,
+                dry_run: false,
+            })
+            .expect("diff");
+        assert!(report.diffs.iter().any(|diff| {
+            diff.path.as_str() == ".agents/skills/repoctl/SKILL.md"
+                && diff.current_exists
+                && diff.diff.contains("-name: \"repoctl\"")
+        }));
     }
 
     #[test]
@@ -3009,8 +3095,9 @@ mod tests {
 
         let root_agents = root_agents("acme", AgentSurface::Codex);
         assert!(root_agents.contains("Repoctl Verification Budget"));
-        assert!(root_agents.contains("reference commands, not a mandatory sequence"));
-        assert!(root_agents.contains("Validate once at todo-batch or goal completion"));
+        assert!(root_agents.contains("repoctl doctor --agent"));
+        assert!(!root_agents.contains("repoctl affected --base"));
+        assert!(!root_agents.contains("repoctl inspect size --scope changed"));
 
         let request = NewProjectRequest {
             repo: None,
@@ -3231,6 +3318,42 @@ mod tests {
             .expect("resolve");
         assert_eq!(template.manifest.schema.as_str(), "repoctl.template/v1");
         assert_eq!(template.root.as_str(), "templates/builtin/app");
+    }
+
+    #[test]
+    fn test_should_report_unsupported_local_template_schema() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let template_root = temp.path().join("templates/tesseract-api");
+        fs::create_dir_all(&template_root).expect("template root");
+        fs::write(
+            template_root.join("template.yaml"),
+            "schema: cellis.tesseract/template/v1\nname: tesseract-api\n",
+        )
+        .expect("template");
+        let resolver = DefaultTemplateSourceResolver::default();
+        let root = RepoRoot {
+            absolute: camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf())
+                .unwrap_or_else(|_| camino::Utf8PathBuf::from("/tmp/repoctl-template-test")),
+        };
+        let error = resolver
+            .resolve(
+                &root,
+                &TemplateSource::Local {
+                    root: RepoRelativePath::new("templates/tesseract-api").expect("path"),
+                },
+            )
+            .expect_err("unsupported schema");
+        let diagnostics = match error {
+            RepoctlError::Diagnostic { diagnostic } => vec![*diagnostic],
+            RepoctlError::Diagnostics { diagnostics } => diagnostics,
+            RepoctlError::Io { .. } | RepoctlError::Environment(_) | RepoctlError::Internal(_) => {
+                Vec::new()
+            }
+        };
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_ref() == "template.schema.unsupported"
+                && diagnostic.message.contains("cellis.tesseract/template/v1")
+        }));
     }
 
     #[test]

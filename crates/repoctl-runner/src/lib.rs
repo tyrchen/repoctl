@@ -512,20 +512,24 @@ impl RunnerService {
         match request.operation {
             ProtoOperation::Owners => {
                 let selector = required_selector(request)?;
+                let owners = proto_projects(&snapshot, selector, ProtoMatchKind::Owner)?;
+                let diagnostics = proto_empty_state_diagnostics(&snapshot, owners.is_empty());
                 Ok(ProtoFacadeReport {
-                    owners: proto_projects(&snapshot, selector, ProtoMatchKind::Owner)?,
+                    owners,
                     consumers: Vec::new(),
                     commands: Vec::new(),
-                    diagnostics: Vec::new(),
+                    diagnostics,
                 })
             }
             ProtoOperation::Consumers => {
                 let selector = required_selector(request)?;
+                let consumers = proto_projects(&snapshot, selector, ProtoMatchKind::Consumer)?;
+                let diagnostics = proto_empty_state_diagnostics(&snapshot, consumers.is_empty());
                 Ok(ProtoFacadeReport {
                     owners: Vec::new(),
-                    consumers: proto_projects(&snapshot, selector, ProtoMatchKind::Consumer)?,
+                    consumers,
                     commands: Vec::new(),
-                    diagnostics: Vec::new(),
+                    diagnostics,
                 })
             }
             ProtoOperation::Check => {
@@ -833,7 +837,12 @@ impl RunnerService {
             request.head.as_deref(),
             &request.changed_files,
         )?;
-        provider_capability_reports(&snapshot, request.workspace.as_deref(), &changed_files)
+        let mut reports =
+            provider_capability_reports(&snapshot, request.workspace.as_deref(), &changed_files)?;
+        if reports.is_empty() {
+            reports.push(provider_capability_not_found_report("all-workspaces"));
+        }
+        Ok(reports)
     }
 
     /// Manages local operations session journals.
@@ -1003,6 +1012,27 @@ impl RunnerService {
             "task.plan.no_matching_task",
             "no project or workspace declares the requested task",
         )])
+    }
+}
+
+fn proto_empty_state_diagnostics(snapshot: &RepoSnapshot, no_matches: bool) -> Vec<Diagnostic> {
+    let has_declared_proto_packages = snapshot
+        .projects
+        .iter()
+        .any(|project| !project.protos.owns.is_empty() || !project.protos.consumes.is_empty());
+    if no_matches && !has_declared_proto_packages {
+        vec![
+            Diagnostic::warning(
+                "proto.packages.empty",
+                "no proto packages are declared in this repository",
+            )
+            .with_help(
+                "add proto ownership or consumption to project.yaml before relying on proto \
+                 routing",
+            ),
+        ]
+    } else {
+        Vec::new()
     }
 }
 
@@ -1574,7 +1604,30 @@ fn provider_capability_reports(
             }
         }
     }
+    if reports.is_empty()
+        && let Some(selector) = selector
+    {
+        reports.push(provider_capability_not_found_report(selector));
+    }
     Ok(reports)
+}
+
+fn provider_capability_not_found_report(workspace: &str) -> ProviderCapabilityReport {
+    ProviderCapabilityReport {
+        workspace: workspace.to_string(),
+        package: "unknown".to_string(),
+        version: "unknown".to_string(),
+        resource: "provider-capability".to_string(),
+        field: "workspace".to_string(),
+        status: "not-found".to_string(),
+        advice: "no recognized provider package or capability pattern was found for the selected \
+                 workspace"
+            .to_string(),
+        diagnostics: vec![Diagnostic::warning(
+            "provider.capability.not_found",
+            "no provider capabilities found for the selected workspace",
+        )],
+    }
 }
 
 fn package_version(path: &Path, package: &str) -> Result<Option<String>, RepoctlError> {
@@ -2687,6 +2740,40 @@ mod tests {
         assert!(!redacted.contains("abc123"));
         assert!(!redacted.contains("def456"));
         assert!(!redacted.contains("session=ghi"));
+    }
+
+    #[test]
+    fn test_should_warn_when_proto_lookup_has_no_declared_packages() {
+        let diagnostics = proto_empty_state_diagnostics(&fixture_snapshot(), true);
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_ref() == "proto.packages.empty"
+                && diagnostic.message.contains("no proto packages")
+        }));
+    }
+
+    #[test]
+    fn test_should_warn_when_selected_provider_capability_is_not_found() {
+        let reports =
+            provider_capability_reports(&fixture_snapshot(), Some("apps.catalog:api"), &[])
+                .expect("provider reports");
+
+        assert_eq!(reports[0].status, "not-found");
+        assert!(
+            reports[0]
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code.as_ref() == "provider.capability.not_found" })
+        );
+    }
+
+    #[test]
+    fn test_should_render_provider_capability_not_found_report() {
+        let report = provider_capability_not_found_report("all-workspaces");
+
+        assert_eq!(report.workspace, "all-workspaces");
+        assert_eq!(report.status, "not-found");
+        assert!(report.advice.contains("no recognized provider package"));
     }
 
     fn fixture_snapshot() -> RepoSnapshot {
