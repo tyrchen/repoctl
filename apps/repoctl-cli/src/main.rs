@@ -20,13 +20,15 @@ use repoctl::{
     AdoptionApplyRequest, AdoptionCiMode, AdoptionOutputFormat, AdoptionPlan, AdoptionPlanRequest,
     AdoptionVerifyRequest, AffectedReport, AffectedRequest, AiContext, AiContextRequest,
     BoundaryLintRequest, CiFallback, CiMatrixReport, CiMatrixRequest, CiProvider, CiWorkflowReport,
-    CiWorkflowRequest, CodegenCheckReport, CodegenCheckRequest, DependencyRewriteMode, Diagnostic,
-    ExplainReport, ExplainRequest, FileOperation, GraphPrintReport, GraphPrintRequest,
-    GraphValidateRequest, HygieneCheckRequest, HygieneCleanRequest, HygieneReport, IacFacadeReport,
-    IacFacadeRequest, IacProvider, InitPlan, InitProfile, InitRequest, NewProjectRequest,
-    OpsJournalAction, OpsJournalReport, OpsJournalRequest, OpsPlan, OpsPlanRequest,
-    OpsReconcileReport, OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest, OwnerHandle,
-    PrSummary, PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName, ProtoFacadeReport,
+    CiWorkflowRequest, CodeLanguage, CodeSizeFinding, CodeSizeInspectionReport,
+    CodeSizeInspectionRequest, CodeSizeRuleKind, CodeSizeScope, CodegenCheckReport,
+    CodegenCheckRequest, DependencyRewriteMode, Diagnostic, ExplainReport, ExplainRequest,
+    FileOperation, GraphPrintReport, GraphPrintRequest, GraphValidateRequest, HygieneCheckRequest,
+    HygieneCleanRequest, HygieneReport, IacFacadeReport, IacFacadeRequest, IacProvider, InitPlan,
+    InitProfile, InitRequest, InspectionFailOn, NewProjectRequest, OpsJournalAction,
+    OpsJournalReport, OpsJournalRequest, OpsPlan, OpsPlanRequest, OpsReconcileReport,
+    OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest, OwnerHandle, PrSummary,
+    PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName, ProtoFacadeReport,
     ProtoFacadeRequest, ProtoOperation, ProtoPackageName, ProviderCapabilityReport,
     ProviderCapabilityRequest, RenderPlan, RepoLayout, RepoName, RepoRelativePath, Repoctl,
     RepoctlError, Severity, SkillsFacadeRequest, TaskName, TaskRunReport, TaskRunRequest,
@@ -187,6 +189,11 @@ enum Command {
     Codegen {
         #[command(subcommand)]
         command: CodegenCommand,
+    },
+    /// Inspect source code shape.
+    Inspect {
+        #[command(subcommand)]
+        command: InspectCommand,
     },
     /// Proto ownership and compatibility helpers.
     Proto {
@@ -490,6 +497,43 @@ enum CodegenCommand {
         /// Head git ref.
         #[arg(long)]
         head: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InspectCommand {
+    /// Inspect source files for oversized files, functions, and blocks.
+    Size {
+        /// Repository root or path inside the repo.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Scan scope.
+        #[arg(long, value_enum, default_value_t = CodeSizeScopeArg::All)]
+        scope: CodeSizeScopeArg,
+        /// Base git ref for changed or affected scope.
+        #[arg(long)]
+        base: Option<String>,
+        /// Head git ref for changed or affected scope.
+        #[arg(long)]
+        head: Option<String>,
+        /// Explicit changed source file.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Include transitively affected projects.
+        #[arg(long)]
+        include_transitive: bool,
+        /// Language filter. May be repeated or comma-delimited.
+        #[arg(long = "language", value_enum, value_delimiter = ',')]
+        languages: Vec<CodeLanguageArg>,
+        /// Rule filter. May be repeated or comma-delimited.
+        #[arg(long = "rule", value_enum, value_delimiter = ',')]
+        rules: Vec<CodeSizeRuleArg>,
+        /// Process exit behavior.
+        #[arg(long, value_enum, default_value_t = InspectionFailOnArg::Never)]
+        fail_on: InspectionFailOnArg,
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
@@ -809,6 +853,34 @@ enum OutputFormat {
     Human,
     Json,
     GithubActions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CodeSizeScopeArg {
+    All,
+    Changed,
+    Affected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CodeLanguageArg {
+    Rust,
+    Typescript,
+    Python,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CodeSizeRuleArg {
+    File,
+    Function,
+    Block,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum InspectionFailOnArg {
+    Never,
+    Error,
+    Warning,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -1198,6 +1270,36 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 Ok(exit_for_diagnostics(&report.diagnostics))
             }
         },
+        Command::Inspect { command } => match command {
+            InspectCommand::Size {
+                repo,
+                scope,
+                base,
+                head,
+                changed_files,
+                include_transitive,
+                languages,
+                rules,
+                fail_on,
+                format,
+            } => {
+                let fail_on = InspectionFailOn::from(fail_on);
+                let request = CodeSizeInspectionRequest {
+                    repo,
+                    scope: scope.into(),
+                    base,
+                    head,
+                    changed_files: parse_changed_files(changed_files)?,
+                    include_transitive,
+                    languages: languages.into_iter().map(Into::into).collect(),
+                    rules: rules.into_iter().map(Into::into).collect(),
+                    fail_on,
+                };
+                let report = repoctl.inspect_code_size(request)?;
+                render_code_size_report(&report, format)?;
+                Ok(exit_for_code_size_report(&report, fail_on))
+            }
+        },
         Command::Proto { command } => match command {
             ProtoCommand::Owners {
                 selector,
@@ -1499,6 +1601,46 @@ impl From<CiProviderArg> for CiProvider {
     fn from(value: CiProviderArg) -> Self {
         match value {
             CiProviderArg::GithubActions => Self::GitHubActions,
+        }
+    }
+}
+
+impl From<CodeSizeScopeArg> for CodeSizeScope {
+    fn from(value: CodeSizeScopeArg) -> Self {
+        match value {
+            CodeSizeScopeArg::All => Self::All,
+            CodeSizeScopeArg::Changed => Self::Changed,
+            CodeSizeScopeArg::Affected => Self::Affected,
+        }
+    }
+}
+
+impl From<CodeLanguageArg> for CodeLanguage {
+    fn from(value: CodeLanguageArg) -> Self {
+        match value {
+            CodeLanguageArg::Rust => Self::Rust,
+            CodeLanguageArg::Typescript => Self::TypeScript,
+            CodeLanguageArg::Python => Self::Python,
+        }
+    }
+}
+
+impl From<CodeSizeRuleArg> for CodeSizeRuleKind {
+    fn from(value: CodeSizeRuleArg) -> Self {
+        match value {
+            CodeSizeRuleArg::File => Self::File,
+            CodeSizeRuleArg::Function => Self::Function,
+            CodeSizeRuleArg::Block => Self::Block,
+        }
+    }
+}
+
+impl From<InspectionFailOnArg> for InspectionFailOn {
+    fn from(value: InspectionFailOnArg) -> Self {
+        match value {
+            InspectionFailOnArg::Never => Self::Never,
+            InspectionFailOnArg::Error => Self::Error,
+            InspectionFailOnArg::Warning => Self::Warning,
         }
     }
 }
@@ -2123,6 +2265,64 @@ fn render_codegen_report(
     render_validation_report(&validation, format, "Generated-code check passed.")
 }
 
+fn render_code_size_report(
+    report: &CodeSizeInspectionReport,
+    format: OutputFormat,
+) -> Result<(), RepoctlError> {
+    match format {
+        OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
+        OutputFormat::Human => {
+            let mut output = String::new();
+            append_title(&mut output, "Code size inspection");
+            let _ = writeln!(
+                output,
+                "{} findings across {} files",
+                report.summary.finding_count, report.summary.files_with_findings
+            );
+            let _ = writeln!(
+                output,
+                "Scanned: {}  Skipped: {}  Errors: {}  Duration: {}ms",
+                report.summary.files_scanned,
+                report.summary.files_skipped,
+                report.summary.files_errored,
+                report.summary.duration_millis
+            );
+            if !report.findings.is_empty() {
+                append_table(
+                    &mut output,
+                    "Findings",
+                    &["Severity", "Rule", "Path", "Lines", "Message"],
+                    report.findings.iter().map(finding_row).collect(),
+                );
+            }
+            if !report.skipped.is_empty() {
+                append_table(
+                    &mut output,
+                    "Skipped files",
+                    &["Reason", "Count"],
+                    report
+                        .skipped
+                        .iter()
+                        .map(|item| vec![item.reason.clone(), item.count.to_string()])
+                        .collect(),
+                );
+            }
+            append_diagnostics(&mut output, &report.diagnostics);
+            write_stdout(&output)
+        }
+    }
+}
+
+fn finding_row(finding: &CodeSizeFinding) -> Vec<String> {
+    vec![
+        severity_label(&finding.severity).to_string(),
+        code_size_rule_label(finding.rule).to_string(),
+        finding.path.to_string(),
+        format!("{}-{}", finding.start_line.get(), finding.end_line.get()),
+        finding.message.clone(),
+    ]
+}
+
 fn render_proto_report(
     report: &ProtoFacadeReport,
     format: OutputFormat,
@@ -2677,6 +2877,14 @@ fn severity_label(severity: &Severity) -> &'static str {
     }
 }
 
+fn code_size_rule_label(rule: CodeSizeRuleKind) -> &'static str {
+    match rule {
+        CodeSizeRuleKind::File => "file",
+        CodeSizeRuleKind::Function => "function",
+        CodeSizeRuleKind::Block => "block",
+    }
+}
+
 fn project_kind_label(kind: &ProjectKind) -> &'static str {
     match kind {
         ProjectKind::App => "app",
@@ -2732,6 +2940,40 @@ fn exit_for_diagnostics(diagnostics: &[Diagnostic]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn exit_for_code_size_report(
+    report: &CodeSizeInspectionReport,
+    fail_on: InspectionFailOn,
+) -> ExitCode {
+    if exit_for_diagnostics(&report.diagnostics) != ExitCode::SUCCESS {
+        return ExitCode::from(1);
+    }
+    match fail_on {
+        InspectionFailOn::Never => ExitCode::SUCCESS,
+        InspectionFailOn::Error => {
+            if report
+                .findings
+                .iter()
+                .any(|finding| finding.severity == Severity::Error)
+            {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        InspectionFailOn::Warning => {
+            if report
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.severity, Severity::Warning | Severity::Error))
+            {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
     }
 }
 
@@ -2805,6 +3047,38 @@ mod tests {
         assert!(output.contains("code: template.source.invalid"));
         assert!(output.contains("path: templates/app/template.yaml"));
         assert!(output.contains("help: use builtin:<name> or local:<path>"));
+    }
+
+    #[test]
+    fn test_should_fail_code_size_exit_on_warning_when_requested() -> Result<(), Diagnostic> {
+        let report = CodeSizeInspectionReport {
+            findings: vec![CodeSizeFinding {
+                rule: CodeSizeRuleKind::Function,
+                severity: Severity::Warning,
+                path: RepoRelativePath::new("src/lib.rs")?,
+                project: None,
+                language: CodeLanguage::Rust,
+                symbol: Some("large".to_string()),
+                node_kind: Some("function_item".to_string()),
+                start_line: NonZeroU32::MIN,
+                end_line: NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
+                measured_lines: NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
+                physical_lines: None,
+                limit: NonZeroU32::new(2).unwrap_or(NonZeroU32::MIN),
+                message: "function large spans 3 lines, limit 2".to_string(),
+            }],
+            ..CodeSizeInspectionReport::default()
+        };
+
+        assert_eq!(
+            exit_for_code_size_report(&report, InspectionFailOn::Never),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            exit_for_code_size_report(&report, InspectionFailOn::Warning),
+            ExitCode::from(1)
+        );
+        Ok(())
     }
 
     #[test]

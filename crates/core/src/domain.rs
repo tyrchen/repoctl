@@ -13,7 +13,7 @@ use globset::Glob;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, Severity};
 
 const NAME_MAX_BYTES: usize = 128;
 const OWNER_MAX_BYTES: usize = 64;
@@ -500,6 +500,403 @@ pub enum GeneratedCodePolicy {
     ConsumerLocal,
 }
 
+/// Scope used by code-size inspection.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodeSizeScope {
+    /// Inspect all supported source files in the repository.
+    #[default]
+    All,
+    /// Inspect supported changed source files.
+    Changed,
+    /// Inspect supported source files in affected projects.
+    Affected,
+}
+
+/// Language supported by code-size inspection.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodeLanguage {
+    /// Rust source.
+    Rust,
+    /// TypeScript or TSX source.
+    #[serde(rename = "typescript")]
+    TypeScript,
+    /// Python source.
+    Python,
+}
+
+/// Code-size inspection rule.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodeSizeRuleKind {
+    /// Effective file line count rule.
+    File,
+    /// Function span line count rule.
+    Function,
+    /// Nested executable block span line count rule.
+    Block,
+}
+
+/// Process exit behavior for inspection commands.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InspectionFailOn {
+    /// Never fail the process because of findings.
+    #[default]
+    Never,
+    /// Fail when error findings exist.
+    Error,
+    /// Fail when warning or error findings exist.
+    Warning,
+}
+
+/// Generated-code inspection mode.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeneratedCodeInspectionMode {
+    /// Skip generated source files.
+    #[default]
+    Skip,
+    /// Inspect generated source files.
+    Inspect,
+}
+
+/// Request for code-size inspection.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeInspectionRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Inspection scope.
+    pub scope: CodeSizeScope,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
+    /// Explicit changed source files.
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Include transitively affected projects for affected scope.
+    pub include_transitive: bool,
+    /// Optional language filter.
+    pub languages: Vec<CodeLanguage>,
+    /// Optional rule filter.
+    pub rules: Vec<CodeSizeRuleKind>,
+    /// Process exit behavior.
+    pub fail_on: InspectionFailOn,
+}
+
+/// Code-size inspection report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeInspectionReport {
+    /// Inspection scope.
+    pub scope: CodeSizeScope,
+    /// Optional base git ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// Optional head git ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Summary counts and duration.
+    pub summary: CodeSizeInspectionSummary,
+    /// Stable configuration explanation.
+    pub config: CodeSizeResolvedConfigSummary,
+    /// Oversize findings.
+    pub findings: Vec<CodeSizeFinding>,
+    /// Operational diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Bounded skipped-file reason counts.
+    pub skipped: Vec<CodeSizeSkippedReason>,
+}
+
+/// Summary of one code-size inspection run.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeInspectionSummary {
+    /// Number of files selected before source-level filters.
+    pub files_considered: u64,
+    /// Number of files scanned.
+    pub files_scanned: u64,
+    /// Number of selected files skipped.
+    pub files_skipped: u64,
+    /// Number of selected files that produced read or parse errors.
+    pub files_errored: u64,
+    /// Total finding count.
+    pub finding_count: u64,
+    /// Number of files with at least one finding.
+    pub files_with_findings: u64,
+    /// Inspection duration in milliseconds.
+    pub duration_millis: u64,
+}
+
+/// Summary of resolved configuration values.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeResolvedConfigSummary {
+    /// Whether inspection is enabled.
+    pub enabled: bool,
+    /// Generated-code handling mode.
+    pub generated_code: GeneratedCodeInspectionMode,
+    /// Maximum selected files.
+    pub max_files: NonZeroUsize,
+    /// Maximum bytes read from one file.
+    pub max_file_bytes: NonZeroUsize,
+    /// Rule defaults after repository-level config.
+    pub rules: CodeSizeRuleConfigSet,
+}
+
+impl Default for CodeSizeResolvedConfigSummary {
+    fn default() -> Self {
+        let config = CodeSizeConfig::default();
+        Self {
+            enabled: config.enabled,
+            generated_code: config.generated_code,
+            max_files: config.max_files,
+            max_file_bytes: config.max_file_bytes,
+            rules: config.rules,
+        }
+    }
+}
+
+/// Code-size finding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeFinding {
+    /// Triggered rule.
+    pub rule: CodeSizeRuleKind,
+    /// Configured severity.
+    pub severity: Severity,
+    /// Repo-relative source path.
+    pub path: RepoRelativePath,
+    /// Owning project when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectName>,
+    /// Source language.
+    pub language: CodeLanguage,
+    /// Symbol name when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    /// Syntax node kind when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_kind: Option<String>,
+    /// One-based start line.
+    pub start_line: NonZeroU32,
+    /// One-based end line.
+    pub end_line: NonZeroU32,
+    /// Measured line count.
+    pub measured_lines: NonZeroU32,
+    /// Physical file line count for file-size findings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_lines: Option<NonZeroU32>,
+    /// Configured rule limit.
+    pub limit: NonZeroU32,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+/// Bounded count for skipped-file reasons.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeSkippedReason {
+    /// Stable reason code.
+    pub reason: String,
+    /// Number of skipped files with this reason.
+    pub count: u64,
+}
+
+/// Repository-level inspection configuration.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoInspectionConfig {
+    /// Code-size inspection configuration.
+    pub code_size: CodeSizeConfig,
+}
+
+/// Code-size inspection configuration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeConfig {
+    /// Enables code-size inspection.
+    pub enabled: bool,
+    /// Generated-code handling mode.
+    pub generated_code: GeneratedCodeInspectionMode,
+    /// Maximum files selected for one scan.
+    pub max_files: NonZeroUsize,
+    /// Maximum bytes read from one file.
+    pub max_file_bytes: NonZeroUsize,
+    /// Rule configuration.
+    pub rules: CodeSizeRuleConfigSet,
+    /// Per-language enablement.
+    pub languages: BTreeMap<CodeLanguage, CodeLanguageConfig>,
+    /// Repo-relative exclusion globs.
+    pub excludes: Vec<RepoGlob>,
+    /// Path overrides in manifest order.
+    pub overrides: Vec<CodeSizeOverride>,
+}
+
+impl Default for CodeSizeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            generated_code: GeneratedCodeInspectionMode::Skip,
+            max_files: nonzero_usize(50_000),
+            max_file_bytes: nonzero_usize(2_000_000),
+            rules: CodeSizeRuleConfigSet::default(),
+            languages: default_code_size_languages(),
+            excludes: default_code_size_excludes(),
+            overrides: Vec::new(),
+        }
+    }
+}
+
+/// Per-language code-size settings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeLanguageConfig {
+    /// Enables inspection for this language.
+    pub enabled: bool,
+}
+
+impl Default for CodeLanguageConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Code-size rule configuration set.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeRuleConfigSet {
+    /// File-size rule configuration.
+    pub file: CodeSizeRuleConfig,
+    /// Function-size rule configuration.
+    pub function: CodeSizeRuleConfig,
+    /// Block-size rule configuration.
+    pub block: CodeSizeRuleConfig,
+}
+
+impl Default for CodeSizeRuleConfigSet {
+    fn default() -> Self {
+        Self {
+            file: CodeSizeRuleConfig {
+                enabled: true,
+                max_lines: nonzero_u32(1_000),
+                severity: Severity::Warning,
+                include_tests: false,
+            },
+            function: CodeSizeRuleConfig {
+                enabled: true,
+                max_lines: nonzero_u32(250),
+                severity: Severity::Warning,
+                include_tests: true,
+            },
+            block: CodeSizeRuleConfig {
+                enabled: true,
+                max_lines: nonzero_u32(50),
+                severity: Severity::Warning,
+                include_tests: true,
+            },
+        }
+    }
+}
+
+impl CodeSizeRuleConfigSet {
+    /// Returns config for one rule.
+    pub fn get(&self, rule: CodeSizeRuleKind) -> &CodeSizeRuleConfig {
+        match rule {
+            CodeSizeRuleKind::File => &self.file,
+            CodeSizeRuleKind::Function => &self.function,
+            CodeSizeRuleKind::Block => &self.block,
+        }
+    }
+
+    /// Returns mutable config for one rule.
+    pub fn get_mut(&mut self, rule: CodeSizeRuleKind) -> &mut CodeSizeRuleConfig {
+        match rule {
+            CodeSizeRuleKind::File => &mut self.file,
+            CodeSizeRuleKind::Function => &mut self.function,
+            CodeSizeRuleKind::Block => &mut self.block,
+        }
+    }
+}
+
+/// Code-size rule settings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeRuleConfig {
+    /// Enables this rule.
+    pub enabled: bool,
+    /// Maximum allowed lines.
+    pub max_lines: NonZeroU32,
+    /// Finding severity.
+    pub severity: Severity,
+    /// Whether this rule includes test paths and test ranges.
+    pub include_tests: bool,
+}
+
+/// Path-specific code-size override.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeOverride {
+    /// Matching path globs.
+    pub paths: Vec<RepoGlob>,
+    /// Rule patches applied by this override.
+    pub rules: CodeSizeRuleConfigPatchSet,
+    /// Required human reason for the override.
+    pub reason: String,
+}
+
+/// Optional rule patch set.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeRuleConfigPatchSet {
+    /// File rule patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<CodeSizeRuleConfigPatch>,
+    /// Function rule patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<CodeSizeRuleConfigPatch>,
+    /// Block rule patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block: Option<CodeSizeRuleConfigPatch>,
+}
+
+impl CodeSizeRuleConfigPatchSet {
+    /// Returns patch for one rule.
+    pub fn get(&self, rule: CodeSizeRuleKind) -> Option<&CodeSizeRuleConfigPatch> {
+        match rule {
+            CodeSizeRuleKind::File => self.file.as_ref(),
+            CodeSizeRuleKind::Function => self.function.as_ref(),
+            CodeSizeRuleKind::Block => self.block.as_ref(),
+        }
+    }
+}
+
+/// Optional code-size rule patch.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeSizeRuleConfigPatch {
+    /// Enables or disables this rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Maximum allowed lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_lines: Option<NonZeroU32>,
+    /// Finding severity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    /// Whether this rule includes test paths and test ranges.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_tests: Option<bool>,
+}
+
 /// Validated repo-level manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -526,6 +923,9 @@ pub struct RepoManifest {
     pub generated_code_policy: GeneratedCodePolicy,
     /// Global policy settings.
     pub policies: RepoPolicySet,
+    /// Repository inspection settings.
+    #[serde(default)]
+    pub inspection: RepoInspectionConfig,
 }
 
 /// Repo-level policy configuration.
@@ -2574,6 +2974,36 @@ fn split_command(value: &str) -> Result<Vec<String>, Diagnostic> {
         parts.push(current);
     }
     Ok(parts)
+}
+
+fn nonzero_u32(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).unwrap_or(NonZeroU32::MIN)
+}
+
+fn nonzero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).unwrap_or(NonZeroUsize::MIN)
+}
+
+fn default_code_size_languages() -> BTreeMap<CodeLanguage, CodeLanguageConfig> {
+    [
+        (CodeLanguage::Rust, CodeLanguageConfig::default()),
+        (CodeLanguage::TypeScript, CodeLanguageConfig::default()),
+        (CodeLanguage::Python, CodeLanguageConfig::default()),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn default_code_size_excludes() -> Vec<RepoGlob> {
+    [
+        "**/target/**",
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/.next/**",
+    ]
+    .into_iter()
+    .filter_map(|pattern| RepoGlob::new(pattern).ok())
+    .collect()
 }
 
 #[cfg(test)]

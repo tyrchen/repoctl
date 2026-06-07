@@ -130,6 +130,7 @@ repoctl provider capabilities --workspace frameworks.operon:infra
 | `repoctl ci` | Build CI matrix output, including GitHub Actions output. |
 | `repoctl template` | List and render built-in or local templates. |
 | `repoctl codegen` | Detect direct edits to generated code. |
+| `repoctl inspect` | Inspect code size for oversized files, functions, and nested blocks. |
 | `repoctl proto` | Query proto owners and consumers, and check proto policy. |
 | `repoctl context` | Build project-scoped AI context. |
 | `repoctl pr` | Build PR impact summaries. |

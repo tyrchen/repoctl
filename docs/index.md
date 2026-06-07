@@ -14,3 +14,4 @@
 ## Research
 
 - [repoctl v0.2 dependency research](research/repoctl-v0.2-dependency-research.md)
+- [repoctl v0.5 code size inspection dependency research](research/repoctl-v0.5-code-size-inspection-dependency-research.md)

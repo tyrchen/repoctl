@@ -2705,6 +2705,7 @@ mod tests {
             context_output: RepoRelativePath::new("target/repoctl/context").expect("path"),
             generated_code_policy: repoctl_core::GeneratedCodePolicy::ConsumerLocal,
             policies: RepoPolicySet::default(),
+            inspection: repoctl_core::RepoInspectionConfig::default(),
         };
         let mut tasks = BTreeMap::new();
         tasks.insert(
