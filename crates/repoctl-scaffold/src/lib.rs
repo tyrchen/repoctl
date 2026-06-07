@@ -1138,6 +1138,13 @@ fn skill_specs(surface: AgentSurface) -> Vec<GeneratedSkill> {
 }
 
 fn skill_content(name: &str, description: &str, body: &str, surface: AgentSurface) -> String {
+    let rendered_body = match surface {
+        AgentSurface::Codex => body
+            .replace("CLAUDE.md", "AGENTS.md")
+            .replace("Claude", "Codex")
+            .replace("claude", "codex"),
+        AgentSurface::Claude => body.to_string(),
+    };
     format!(
         r#"---
 name: "{name}"
@@ -1152,7 +1159,7 @@ This skill is generated for {product}. Keep it synchronized with `repoctl skills
 intended to be directly usable after `repoctl init`; teams should tune owners, commands, and local
 exceptions rather than replacing the workflow with a placeholder.
 
-{body}
+{rendered_body}
 "#,
         product = surface.product_name(),
     )
@@ -1220,7 +1227,19 @@ the user is asking to adopt repoctl; otherwise inspect the existing repo layout 
    Use the merge-base or PR base that matches the review target. If `origin/main` is not the target
    branch, name the actual base explicitly in the hand-off.
 
-4. **Dry-run expensive work**:
+4. **Inspect changed code shape**:
+
+   ```bash
+   repoctl inspect size --scope changed --base origin/main --head HEAD --fail-on warning
+   ```
+
+   Run this for Rust, TypeScript/TSX, or Python source changes before review. Use
+   `--scope affected` when a change fans out across an owned project, and `--scope all` when shared
+   thresholds, excludes, templates, skills, or graph/inspection logic change. Treat oversized files,
+   functions, and nested blocks as refactoring findings unless an explicit `inspection.code_size`
+   override with a concrete reason applies.
+
+5. **Dry-run expensive work**:
 
    ```bash
    repoctl run check --affected --dry-run
@@ -1229,7 +1248,7 @@ the user is asking to adopt repoctl; otherwise inspect the existing repo layout 
 
    Run the real tasks only after the dry-run confirms the intended project set.
 
-5. **Generate agent context only when it helps**:
+6. **Generate agent context only when it helps**:
 
    ```bash
    repoctl context <project-name> --format json
@@ -1242,6 +1261,8 @@ the user is asking to adopt repoctl; otherwise inspect the existing repo layout 
 
 - Do not hand-edit generated state to silence repoctl diagnostics.
 - Do not substitute package-manager commands for repoctl affected analysis when the question is impact.
+- Do not skip `repoctl inspect size` for Rust, TypeScript/TSX, or Python source changes; explain any
+  code-size findings, configured overrides, or intentionally broader scope in the hand-off.
 - Do broaden to repo-wide checks when `repo.yaml`, templates, skills, root CI, or graph validation
   logic changes.
 - Final responses should name skipped heavyweight gates and why they were not relevant.
@@ -1529,14 +1550,25 @@ Summaries come after findings. Do not approve a risky diff just because the chan
    Compare this with the checks that actually ran. Missing affected tasks are findings, not
    footnotes.
 
-4. **Inspect risky paths**:
+4. **Inspect code-size risk**:
+
+   ```bash
+   repoctl inspect size --scope changed --base origin/main --head HEAD --fail-on warning
+   ```
+
+   Run this for Rust, TypeScript/TSX, or Python source changes. Use `--scope affected` when the PR
+   changes a shared project surface and `--scope all` when code-size policy, templates, skills, or
+   inspection logic changes. Oversized files, functions, or nested blocks are review findings unless
+   a matching `inspection.code_size` override explains the exception.
+
+5. **Inspect risky paths**:
 
    - `repo.yaml`, `.github/`, `templates/`, `.agents/skills/`, `.claude/skills/` affect the repo.
    - `protos/` can break consumers even when source compiles.
    - `generated/` or `gen/` should usually be regenerated, not manually patched.
    - `deploy/prod/`, `iac/stacks/prod/`, and shared `core-infra/` need owner review.
 
-5. **Review changed code in owner context**:
+6. **Review changed code in owner context**:
 
    Use `repoctl explain <project-name>` for each affected project before deciding whether the
    change respects facades, clients, and editable areas.
@@ -1556,6 +1588,8 @@ If there are no findings, say so clearly and name residual risks or skipped gate
 
 - Every finding cites a file and line when possible.
 - Every requested gate maps to an affected project or repo-wide surface.
+- Code-size inspection is included for Rust, TypeScript/TSX, or Python source changes, and any
+  finding is either called out or tied to a configured override.
 - Owner review is explicit for production IaC, proto breaking changes, and framework internals.
 - Do not replace code review with repoctl output; repoctl scopes the review, it does not perform it.
 
@@ -1963,15 +1997,21 @@ on it in reviews.
    wider impact.
 4. **Validate structure** - run `repoctl graph validate` after structural, manifest, template,
    skill, or CI changes.
-5. **Validate behavior** - run `repoctl affected --base origin/main --head HEAD --tasks check,test`
+5. **Inspect code size** - run `repoctl inspect size --scope changed --base origin/main --head HEAD
+   --fail-on warning` for Rust, TypeScript/TSX, or Python source changes. Use `--scope affected`
+   for project-wide risk and `--scope all` when this workflow changes shared code-size policy,
+   templates, skills, or inspection logic.
+6. **Validate behavior** - run `repoctl affected --base origin/main --head HEAD --tasks check,test`
    before review, then execute the affected tasks that match the changed surface.
-6. **Escalate deliberately** - call out owners when the change touches production IaC, proto
+7. **Escalate deliberately** - call out owners when the change touches production IaC, proto
    contracts, generated-code policy, or cross-project dependencies.
 
 ## Quality bar
 
 - No placeholder owners, commands, or unfinished markers remain in the generated workflow.
 - Every command in the hand-off maps to a changed surface.
+- v0.5 code-size checks are enforced for supported source changes; findings are fixed or explained
+  by a concrete `inspection.code_size` override.
 - Generated or managed files are changed through their source template or generator.
 - The final response names any gate that was intentionally skipped.
 
@@ -2862,6 +2902,15 @@ mod tests {
         assert!(skill.contains("## When this fires"));
         assert!(skill.contains("## Quality bar"));
         assert!(skill.contains("repoctl affected"));
+        assert!(skill.contains("repoctl inspect size --scope changed"));
+        assert!(skill.contains("Do not skip `repoctl inspect size`"));
+        let boundary = fs::read_to_string(
+            temp.path()
+                .join(".agents/skills/monorepo-boundaries/SKILL.md"),
+        )
+        .expect("boundary skill");
+        assert!(boundary.contains(".codex/skills"));
+        assert!(!boundary.contains(".claude/skills"));
         let config = fs::read_to_string(
             temp.path()
                 .join(".agents/skills/repoctl/agents/openai.yaml"),
@@ -3105,6 +3154,8 @@ mod tests {
         let skill = builtin_template_file_content("skills", "SKILL.md.j2").expect("skill");
         assert!(skill.contains("## When this fires"));
         assert!(skill.contains("## Quality bar"));
+        assert!(skill.contains("repoctl inspect size --scope changed"));
+        assert!(skill.contains("v0.5 code-size checks are enforced"));
         let config = builtin_template_file_content("skills", "openai.yaml.j2").expect("config");
         assert!(config.contains("default_prompt:"));
     }

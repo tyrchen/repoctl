@@ -1,0 +1,4 @@
+interface:
+  display_name: "App Creation"
+  short_description: "Create apps, frameworks, and foundation services from usable monorepo templates"
+  default_prompt: "Use the app-creation skill to scaffold new projects with repoctl, choose the correct project kind, and verify manifests, tasks, docs, and boundaries."

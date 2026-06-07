@@ -1,0 +1,4 @@
+interface:
+  display_name: "Proto Change"
+  short_description: "Change protobuf contracts through owners and consumers"
+  default_prompt: "Use the proto-change skill to locate proto ownership, check consumers, update source contracts, and regenerate or validate outputs through repoctl."

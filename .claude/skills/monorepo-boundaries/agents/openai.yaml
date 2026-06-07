@@ -1,0 +1,4 @@
+interface:
+  display_name: "Monorepo Boundaries"
+  short_description: "Keep app, framework, foundation, proto, IaC, and generated-code boundaries intact"
+  default_prompt: "Use the monorepo-boundaries skill to classify changed paths, confirm ownership, and prevent cross-project dependency or generated-code mistakes."

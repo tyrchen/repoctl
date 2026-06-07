@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repoctl"
+  short_description: "Use repoctl graph, affected, context, and task workflows"
+  default_prompt: "Use the repoctl skill to inspect the monorepo graph, compute affected work, run scoped tasks, and generate agent context before editing boundaries."
