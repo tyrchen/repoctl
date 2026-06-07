@@ -16,6 +16,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -418,37 +419,7 @@ impl Repoctl {
             };
         }
 
-        let sections = vec![
-            self.doctor_graph_section(repo.clone(), changed_files.clone()),
-            self.doctor_affected_section(
-                repo.clone(),
-                base.clone(),
-                head.clone(),
-                changed_files.clone(),
-                tasks,
-            ),
-            self.doctor_skills_section(repo.clone()),
-            self.doctor_hygiene_section(repo.clone()),
-            self.doctor_codegen_section(
-                repo.clone(),
-                base.clone(),
-                head.clone(),
-                changed_files.clone(),
-            ),
-            self.doctor_inspect_size_section(
-                repo.clone(),
-                base.clone(),
-                head.clone(),
-                changed_files.clone(),
-            ),
-            self.doctor_proto_section(
-                repo.clone(),
-                base.clone(),
-                head.clone(),
-                changed_files.clone(),
-            ),
-            self.doctor_iac_section(repo, base, head, changed_files),
-        ];
+        let sections = self.run_doctor_sections(repo, base, head, changed_files, tasks);
 
         let has_blocked = sections
             .iter()
@@ -475,6 +446,96 @@ impl Repoctl {
             has_errors,
             sections,
         }
+    }
+
+    fn run_doctor_sections(
+        &self,
+        repo: Option<PathBuf>,
+        base: Option<String>,
+        head: Option<String>,
+        changed_files: Vec<RepoRelativePath>,
+        tasks: Vec<TaskName>,
+    ) -> Vec<DoctorSection> {
+        thread::scope(|scope| {
+            let handles = vec![
+                (
+                    "graph",
+                    scope.spawn({
+                        let repo = repo.clone();
+                        let changed_files = changed_files.clone();
+                        move || self.doctor_graph_section(repo, changed_files)
+                    }),
+                ),
+                (
+                    "affected",
+                    scope.spawn({
+                        let repo = repo.clone();
+                        let base = base.clone();
+                        let head = head.clone();
+                        let changed_files = changed_files.clone();
+                        move || self.doctor_affected_section(repo, base, head, changed_files, tasks)
+                    }),
+                ),
+                (
+                    "skills",
+                    scope.spawn({
+                        let repo = repo.clone();
+                        move || self.doctor_skills_section(repo)
+                    }),
+                ),
+                (
+                    "hygiene",
+                    scope.spawn({
+                        let repo = repo.clone();
+                        move || self.doctor_hygiene_section(repo)
+                    }),
+                ),
+                (
+                    "codegen",
+                    scope.spawn({
+                        let repo = repo.clone();
+                        let base = base.clone();
+                        let head = head.clone();
+                        let changed_files = changed_files.clone();
+                        move || self.doctor_codegen_section(repo, base, head, changed_files)
+                    }),
+                ),
+                (
+                    "inspect-size",
+                    scope.spawn({
+                        let repo = repo.clone();
+                        let base = base.clone();
+                        let head = head.clone();
+                        let changed_files = changed_files.clone();
+                        move || self.doctor_inspect_size_section(repo, base, head, changed_files)
+                    }),
+                ),
+                (
+                    "proto",
+                    scope.spawn({
+                        let repo = repo.clone();
+                        let base = base.clone();
+                        let head = head.clone();
+                        let changed_files = changed_files.clone();
+                        move || self.doctor_proto_section(repo, base, head, changed_files)
+                    }),
+                ),
+                (
+                    "iac",
+                    scope.spawn({
+                        move || self.doctor_iac_section(repo, base, head, changed_files)
+                    }),
+                ),
+            ];
+
+            handles
+                .into_iter()
+                .map(|(name, handle)| match handle.join() {
+                    Ok(section) => section,
+                    Err(_) => doctor_worker_panic_section(name),
+                })
+                .collect()
+        })
     }
 
     fn doctor_graph_section(
@@ -796,6 +857,18 @@ fn doctor_section(
             summary: "section could not run".to_string(),
             diagnostics: diagnostics_from_error(error),
         },
+    }
+}
+
+fn doctor_worker_panic_section(name: &str) -> DoctorSection {
+    DoctorSection {
+        name: name.to_string(),
+        status: DoctorStatus::Blocked,
+        summary: "section worker panicked".to_string(),
+        diagnostics: vec![Diagnostic::error(
+            "doctor.section.worker_panic",
+            format!("doctor section `{name}` panicked while running"),
+        )],
     }
 }
 
@@ -2609,6 +2682,23 @@ mod tests {
 
         assert!(report.command_succeeded);
         assert_eq!(report.status, DoctorStatus::Diagnostics);
+        assert_eq!(
+            report
+                .sections
+                .iter()
+                .map(|section| section.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "graph",
+                "affected",
+                "skills",
+                "hygiene",
+                "codegen",
+                "inspect-size",
+                "proto",
+                "iac",
+            ]
+        );
         assert!(
             report
                 .sections
