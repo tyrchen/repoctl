@@ -23,6 +23,7 @@ pub use repoctl_core::*;
 use repoctl_engine::{
     DefaultGraphBuilder, DefaultRepoLocator, DiscoveryService, LocalRepoFileSystem, RepoctlEngine,
 };
+use repoctl_inspect::InspectorService;
 use repoctl_runner::RunnerService;
 use repoctl_scaffold::ScaffoldService;
 use serde_json::Value;
@@ -34,6 +35,7 @@ pub struct Repoctl {
     engine: RepoctlEngine,
     scaffold: ScaffoldService,
     runner: RunnerService,
+    inspector: InspectorService,
     proto: ProtoFacade,
     iac: IacFacade,
     skills: SkillsFacade,
@@ -46,6 +48,7 @@ impl Repoctl {
             engine: RepoctlEngine::with_default_adapters(),
             scaffold: ScaffoldService::with_default_adapters(),
             runner: RunnerService::with_default_adapters(),
+            inspector: InspectorService::with_default_adapters(),
             proto: ProtoFacade {
                 runner: RunnerService::with_default_adapters(),
             },
@@ -313,9 +316,30 @@ impl Repoctl {
         self.runner.codegen_check(&request)
     }
 
+    /// Runs syntax-aware code-size inspection.
+    pub fn inspect_code_size(
+        &self,
+        request: CodeSizeInspectionRequest,
+    ) -> Result<CodeSizeInspectionReport, RepoctlError> {
+        self.inspector.inspect_size(&request)
+    }
+
     /// Builds a PR summary.
     pub fn pr_summary(&self, request: PrSummaryRequest) -> Result<PrSummary, RepoctlError> {
-        self.runner.pr_summary(&request)
+        let mut summary = self.runner.pr_summary(&request)?;
+        let inspection = self.inspector.inspect_size(&CodeSizeInspectionRequest {
+            repo: request.repo,
+            scope: CodeSizeScope::Changed,
+            base: request.base,
+            head: request.head,
+            changed_files: request.changed_files,
+            include_transitive: false,
+            languages: Vec::new(),
+            rules: Vec::new(),
+            fail_on: InspectionFailOn::Never,
+        })?;
+        append_code_size_pr_section(&mut summary, &inspection);
+        Ok(summary)
     }
 
     /// Builds AI context.
@@ -1994,6 +2018,8 @@ jobs:
         run: cargo install --path apps/repoctl-cli --locked
       - name: Validate graph
         run: repoctl graph validate --mode structural
+      - name: Inspect code size
+        run: repoctl inspect size --scope changed --base ${{ github.event.pull_request.base.sha || github.event.before }} --head ${{ github.sha }} --fail-on error
       - id: matrix
         name: Compute matrix
         run: |
@@ -2006,6 +2032,25 @@ jobs:
     append_iac_workflow_job(&mut workflow, jobs.has_iac);
     append_required_workflow_job(&mut workflow, jobs)?;
     Ok(workflow)
+}
+
+fn append_code_size_pr_section(summary: &mut PrSummary, report: &CodeSizeInspectionReport) {
+    if !report.findings.is_empty() {
+        summary.markdown.push_str("\n## Code Size\n");
+        for finding in &report.findings {
+            let _ = writeln!(
+                summary.markdown,
+                "- `{}`: {}",
+                finding.path, finding.message
+            );
+        }
+    }
+    if let Value::Object(object) = &mut summary.impact {
+        object.insert(
+            "codeSize".to_string(),
+            serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({})),
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

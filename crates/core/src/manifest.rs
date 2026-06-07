@@ -6,16 +6,18 @@ use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 
 use crate::{
-    diagnostic::{Diagnostic, RepoctlError},
+    diagnostic::{Diagnostic, RepoctlError, Severity},
     domain::{
-        CdnSpec, CommandSpec, DeploySpec, GeneratedCodePolicy, IacProvider, IacSpec,
+        CdnSpec, CodeLanguage, CodeSizeConfig, CodeSizeOverride, CodeSizeRuleConfig,
+        CodeSizeRuleConfigPatch, CodeSizeRuleConfigPatchSet, CodeSizeRuleConfigSet, CommandSpec,
+        DeploySpec, GeneratedCodeInspectionMode, GeneratedCodePolicy, IacProvider, IacSpec,
         ManualStateRecord, OwnerHandle, PolicyMode, ProbeExpectation, ProbeSpec, ProcessCommand,
         ProjectAiSpec, ProjectAreas, ProjectDependency, ProjectDnsSpec, ProjectKind,
         ProjectManifest, ProjectName, ProjectOpsSpec, ProjectProtoSpec, ProjectRelativePath,
-        RepoGlob, RepoLayout, RepoManifest, RepoName, RepoPolicySet, RepoRelativePath,
-        RuntimeDependencySpec, SchemaId, TaskCommand, TaskDependency, TaskName, TemplateFile,
-        TemplateInput, TemplateManifest, Toolchain, Visibility, WorkspaceLanguage, WorkspaceName,
-        WorkspaceSpec,
+        RepoGlob, RepoInspectionConfig, RepoLayout, RepoManifest, RepoName, RepoPolicySet,
+        RepoRelativePath, RuntimeDependencySpec, SchemaId, TaskCommand, TaskDependency, TaskName,
+        TemplateFile, TemplateInput, TemplateManifest, Toolchain, Visibility, WorkspaceLanguage,
+        WorkspaceName, WorkspaceSpec,
     },
     ports::ManifestParser,
 };
@@ -31,6 +33,12 @@ const OPS_RECORD_LIMIT: usize = 128;
 const OPS_TEXT_MAX_BYTES: usize = 512;
 const TEMPLATE_INPUT_LIMIT: usize = 64;
 const TEMPLATE_FILE_LIMIT: usize = 512;
+const INSPECTION_GLOB_LIMIT: usize = 512;
+const INSPECTION_OVERRIDE_LIMIT: usize = 512;
+const INSPECTION_OVERRIDE_REASON_MAX_BYTES: usize = 512;
+const INSPECTION_MAX_LINES: u32 = 100_000;
+const INSPECTION_MAX_FILES: usize = 1_000_000;
+const INSPECTION_MAX_FILE_BYTES: usize = 50_000_000;
 
 /// Source bytes for one manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -155,6 +163,8 @@ struct RawRepoManifest {
     ai: RawRepoAi,
     #[serde(default)]
     policies: RawRepoPolicies,
+    #[serde(default)]
+    inspection: RawRepoInspection,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -264,6 +274,238 @@ struct RawProdChangePolicy {
     required_owners: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawRepoInspection {
+    #[serde(default)]
+    code_size: RawCodeSizeConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawCodeSizeConfig {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    generated_code: Option<String>,
+    #[serde(default)]
+    max_files: Option<usize>,
+    #[serde(default)]
+    max_file_bytes: Option<usize>,
+    #[serde(default)]
+    rules: RawCodeSizeRuleConfigSet,
+    #[serde(default)]
+    languages: BTreeMap<String, RawCodeLanguageConfig>,
+    #[serde(default)]
+    excludes: Vec<String>,
+    #[serde(default)]
+    overrides: Vec<RawCodeSizeOverride>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawCodeLanguageConfig {
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawCodeSizeRuleConfigSet {
+    #[serde(default)]
+    file: Option<RawCodeSizeRuleConfig>,
+    #[serde(default)]
+    function: Option<RawCodeSizeRuleConfig>,
+    #[serde(default)]
+    block: Option<RawCodeSizeRuleConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawCodeSizeRuleConfig {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    max_lines: Option<u32>,
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    include_tests: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawCodeSizeOverride {
+    paths: Vec<String>,
+    #[serde(default)]
+    rules: RawCodeSizeRuleConfigSet,
+    reason: String,
+}
+
+impl RawRepoInspection {
+    fn into_domain(self) -> Result<RepoInspectionConfig, Diagnostic> {
+        Ok(RepoInspectionConfig {
+            code_size: self.code_size.into_domain()?,
+        })
+    }
+}
+
+impl RawCodeSizeConfig {
+    fn into_domain(self) -> Result<CodeSizeConfig, Diagnostic> {
+        let mut config = CodeSizeConfig::default();
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(generated_code) = self.generated_code {
+            config.generated_code = parse_generated_code_inspection_mode(&generated_code)?;
+        }
+        if let Some(max_files) = self.max_files {
+            config.max_files = nonzero_usize_bounded(
+                max_files,
+                INSPECTION_MAX_FILES,
+                "manifest.inspection.max_files",
+                "inspection.code_size.max_files",
+            )?;
+        }
+        if let Some(max_file_bytes) = self.max_file_bytes {
+            config.max_file_bytes = nonzero_usize_bounded(
+                max_file_bytes,
+                INSPECTION_MAX_FILE_BYTES,
+                "manifest.inspection.max_file_bytes",
+                "inspection.code_size.max_file_bytes",
+            )?;
+        }
+        self.rules.apply_to(&mut config.rules)?;
+        for (name, raw) in bounded_map(self.languages, 16, "manifest.inspection.language.too_many")?
+        {
+            let language = parse_code_language(&name)?;
+            let entry = config.languages.entry(language).or_default();
+            if let Some(enabled) = raw.enabled {
+                entry.enabled = enabled;
+            }
+        }
+        if !self.excludes.is_empty() {
+            config.excludes = bounded_vec(
+                self.excludes,
+                INSPECTION_GLOB_LIMIT,
+                "manifest.inspection.exclude.too_many",
+            )?
+            .into_iter()
+            .map(RepoGlob::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        }
+        config.overrides = bounded_vec(
+            self.overrides,
+            INSPECTION_OVERRIDE_LIMIT,
+            "manifest.inspection.override.too_many",
+        )?
+        .into_iter()
+        .map(RawCodeSizeOverride::into_domain)
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(config)
+    }
+}
+
+impl RawCodeSizeRuleConfigSet {
+    fn apply_to(self, rules: &mut CodeSizeRuleConfigSet) -> Result<(), Diagnostic> {
+        if let Some(file) = self.file {
+            file.apply_to(&mut rules.file)?;
+        }
+        if let Some(function) = self.function {
+            function.apply_to(&mut rules.function)?;
+        }
+        if let Some(block) = self.block {
+            block.apply_to(&mut rules.block)?;
+        }
+        Ok(())
+    }
+
+    fn into_patch_set(self) -> Result<CodeSizeRuleConfigPatchSet, Diagnostic> {
+        Ok(CodeSizeRuleConfigPatchSet {
+            file: self
+                .file
+                .map(RawCodeSizeRuleConfig::into_patch)
+                .transpose()?,
+            function: self
+                .function
+                .map(RawCodeSizeRuleConfig::into_patch)
+                .transpose()?,
+            block: self
+                .block
+                .map(RawCodeSizeRuleConfig::into_patch)
+                .transpose()?,
+        })
+    }
+}
+
+impl RawCodeSizeRuleConfig {
+    fn apply_to(self, rule: &mut CodeSizeRuleConfig) -> Result<(), Diagnostic> {
+        if let Some(enabled) = self.enabled {
+            rule.enabled = enabled;
+        }
+        if let Some(max_lines) = self.max_lines {
+            rule.max_lines = nonzero_u32_bounded(
+                max_lines,
+                INSPECTION_MAX_LINES,
+                "manifest.inspection.max_lines",
+                "inspection.code_size.rules.*.max_lines",
+            )?;
+        }
+        if let Some(severity) = self.severity {
+            rule.severity = parse_severity(&severity)?;
+        }
+        if let Some(include_tests) = self.include_tests {
+            rule.include_tests = include_tests;
+        }
+        Ok(())
+    }
+
+    fn into_patch(self) -> Result<CodeSizeRuleConfigPatch, Diagnostic> {
+        Ok(CodeSizeRuleConfigPatch {
+            enabled: self.enabled,
+            max_lines: self
+                .max_lines
+                .map(|value| {
+                    nonzero_u32_bounded(
+                        value,
+                        INSPECTION_MAX_LINES,
+                        "manifest.inspection.max_lines",
+                        "inspection.code_size.overrides.*.rules.*.max_lines",
+                    )
+                })
+                .transpose()?,
+            severity: self.severity.as_deref().map(parse_severity).transpose()?,
+            include_tests: self.include_tests,
+        })
+    }
+}
+
+impl RawCodeSizeOverride {
+    fn into_domain(self) -> Result<CodeSizeOverride, Diagnostic> {
+        if self.reason.trim().is_empty()
+            || self.reason.len() > INSPECTION_OVERRIDE_REASON_MAX_BYTES
+            || self.reason.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(Diagnostic::error(
+                "manifest.inspection.override.reason",
+                "inspection override reason must be non-empty, length-bounded, and single-line",
+            ));
+        }
+        Ok(CodeSizeOverride {
+            paths: bounded_vec(
+                self.paths,
+                INSPECTION_GLOB_LIMIT,
+                "manifest.inspection.override.path.too_many",
+            )?
+            .into_iter()
+            .map(RepoGlob::new)
+            .collect::<Result<Vec<_>, _>>()?,
+            rules: self.rules.into_patch_set()?,
+            reason: self.reason,
+        })
+    }
+}
+
 impl RawRepoManifest {
     fn into_domain(self) -> Result<RepoManifest, Diagnostic> {
         let schema = SchemaId::new(self.schema)?;
@@ -317,6 +559,7 @@ impl RawRepoManifest {
             context_output: RepoRelativePath::new(self.ai.context_output)?,
             generated_code_policy: parse_generated_policy(&self.protos.generated_code_policy)?,
             policies,
+            inspection: self.inspection.into_domain()?,
         })
     }
 }
@@ -1132,6 +1375,43 @@ fn parse_generated_policy(value: &str) -> Result<GeneratedCodePolicy, Diagnostic
     }
 }
 
+fn parse_generated_code_inspection_mode(
+    value: &str,
+) -> Result<GeneratedCodeInspectionMode, Diagnostic> {
+    match value {
+        "skip" => Ok(GeneratedCodeInspectionMode::Skip),
+        "inspect" => Ok(GeneratedCodeInspectionMode::Inspect),
+        _ => Err(Diagnostic::error(
+            "manifest.inspection.generated_code",
+            format!("unsupported generated-code inspection mode `{value}`"),
+        )),
+    }
+}
+
+fn parse_code_language(value: &str) -> Result<CodeLanguage, Diagnostic> {
+    match value {
+        "rust" => Ok(CodeLanguage::Rust),
+        "typescript" => Ok(CodeLanguage::TypeScript),
+        "python" => Ok(CodeLanguage::Python),
+        _ => Err(Diagnostic::error(
+            "manifest.inspection.language",
+            format!("unsupported code-size language `{value}`"),
+        )),
+    }
+}
+
+fn parse_severity(value: &str) -> Result<Severity, Diagnostic> {
+    match value {
+        "info" => Ok(Severity::Info),
+        "warning" => Ok(Severity::Warning),
+        "error" => Ok(Severity::Error),
+        _ => Err(Diagnostic::error(
+            "manifest.inspection.severity",
+            format!("unsupported inspection severity `{value}`"),
+        )),
+    }
+}
+
 fn parse_project_kind(value: &str) -> Result<ProjectKind, Diagnostic> {
     match value {
         "app" => Ok(ProjectKind::App),
@@ -1276,6 +1556,38 @@ fn bounded_map<K, V>(
     }
 }
 
+fn nonzero_u32_bounded(
+    value: u32,
+    max: u32,
+    code: &str,
+    label: &str,
+) -> Result<std::num::NonZeroU32, Diagnostic> {
+    if value == 0 || value > max {
+        return Err(Diagnostic::error(
+            code,
+            format!("{label} must be in range 1..={max}"),
+        ));
+    }
+    std::num::NonZeroU32::new(value)
+        .ok_or_else(|| Diagnostic::error(code, format!("{label} must be in range 1..={max}")))
+}
+
+fn nonzero_usize_bounded(
+    value: usize,
+    max: usize,
+    code: &str,
+    label: &str,
+) -> Result<std::num::NonZeroUsize, Diagnostic> {
+    if value == 0 || value > max {
+        return Err(Diagnostic::error(
+            code,
+            format!("{label} must be in range 1..={max}"),
+        ));
+    }
+    std::num::NonZeroUsize::new(value)
+        .ok_or_else(|| Diagnostic::error(code, format!("{label} must be in range 1..={max}")))
+}
+
 fn default_protos_root() -> String {
     "protos".to_string()
 }
@@ -1307,7 +1619,7 @@ fn default_template_mode() -> String {
 #[cfg(test)]
 mod tests {
     use super::YamlManifestParser;
-    use crate::domain::{DependencyTarget, ProjectKind};
+    use crate::domain::{CodeLanguage, CodeSizeRuleKind, DependencyTarget, ProjectKind};
 
     const REPO: &str = r#"
 schema: company.repo/v1
@@ -1364,6 +1676,48 @@ post_render:
             .parse_repo_bytes("repo.yaml", REPO.as_bytes())
             .expect("repo parses");
         assert_eq!(manifest.name.as_str(), "acme");
+        assert_eq!(
+            manifest
+                .inspection
+                .code_size
+                .rules
+                .get(CodeSizeRuleKind::File)
+                .max_lines
+                .get(),
+            1_000
+        );
+        assert!(
+            manifest
+                .inspection
+                .code_size
+                .languages
+                .get(&CodeLanguage::Rust)
+                .is_some_and(|config| config.enabled)
+        );
+    }
+
+    #[test]
+    fn test_should_parse_code_size_override() {
+        let yaml = format!(
+            "{REPO}\ninspection:\n  code_size:\n    rules:\n      function:\n        \
+                 max_lines: 120\n    overrides:\n      - paths:\n          - \
+                 \"crates/core/src/domain.rs\"\n        rules:\n          file:\n            \
+                 max_lines: 1600\n        reason: \"public schema module\"\n"
+        );
+        let manifest = YamlManifestParser
+            .parse_repo_bytes("repo.yaml", yaml.as_bytes())
+            .expect("repo parses");
+        assert_eq!(
+            manifest
+                .inspection
+                .code_size
+                .rules
+                .get(CodeSizeRuleKind::Function)
+                .max_lines
+                .get(),
+            120
+        );
+        assert_eq!(manifest.inspection.code_size.overrides.len(), 1);
     }
 
     #[test]

@@ -1,8 +1,5 @@
 [package]
-name = "repoctl"
-description = "Typed facade API for repoctl frontends."
-categories = ["development-tools"]
-keywords = ["monorepo", "cli", "facade"]
+name = "repoctl-inspect"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -10,17 +7,21 @@ license.workspace = true
 documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
 
 [dependencies]
 camino.workspace = true
+globset.workspace = true
+ignore.workspace = true
+memchr.workspace = true
+rayon.workspace = true
 repoctl-core.workspace = true
 repoctl-engine.workspace = true
-repoctl-inspect.workspace = true
 repoctl-runner.workspace = true
-repoctl-scaffold.workspace = true
-serde_json.workspace = true
-serde_norway.workspace = true
-toml_edit.workspace = true
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -279,6 +279,18 @@ repoctl codegen check --base origin/main --head HEAD
 repoctl proto check --base origin/main --head HEAD
 ```
 
+Inspect code size:
+
+```bash
+repoctl inspect size --scope all
+repoctl inspect size --scope changed --base origin/main --head HEAD
+repoctl inspect size --scope affected --base origin/main --head HEAD --include-transitive
+repoctl inspect size --scope all --language rust --rule function --format json
+repoctl inspect size --scope changed --base origin/main --head HEAD --fail-on warning
+```
+
+The size inspector reports oversized production source files, function-like syntax nodes, and nested executable blocks for Rust, TypeScript/TSX, and Python. Repository `inspection.code_size` settings can tune thresholds, test handling, generated-code handling, excludes, and path overrides.
+
 Plan infrastructure commands without applying:
 
 ```bash
