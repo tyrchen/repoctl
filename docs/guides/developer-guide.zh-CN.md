@@ -163,6 +163,7 @@ cargo publish -p repoctl-core --dry-run --allow-dirty
 cargo publish -p repoctl-engine --dry-run --allow-dirty
 cargo publish -p repoctl-scaffold --dry-run --allow-dirty
 cargo publish -p repoctl-runner --dry-run --allow-dirty
+cargo publish -p repoctl-inspect --dry-run --allow-dirty
 cargo publish -p repoctl --dry-run --allow-dirty
 cargo publish -p repoctl-cli --dry-run --allow-dirty
 ```

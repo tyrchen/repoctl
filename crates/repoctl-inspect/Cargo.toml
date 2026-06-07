@@ -1,5 +1,8 @@
 [package]
 name = "repoctl-inspect"
+description = "Syntax-aware code-size inspection services for repoctl."
+categories = ["development-tools"]
+keywords = ["monorepo", "inspect", "analysis"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
