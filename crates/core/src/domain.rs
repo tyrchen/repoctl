@@ -771,6 +771,120 @@ pub struct DeploySpec {
     pub environments: Vec<String>,
 }
 
+/// DNS intent declared by a project manifest.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDnsSpec {
+    /// DNS provider name when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// DNS records owned or verified by the project.
+    pub records: Vec<DnsRecordSpec>,
+}
+
+/// DNS record intent.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsRecordSpec {
+    /// DNS record name.
+    pub name: String,
+    /// DNS record type.
+    pub record_type: String,
+    /// Expected target value or output selector.
+    pub target: String,
+    /// Expected Cloudflare proxy setting when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxied: Option<bool>,
+    /// Expected TTL in seconds when declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u32>,
+}
+
+/// CDN intent declared by a project manifest.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CdnSpec {
+    /// CDN provider name.
+    pub provider: String,
+    /// Host aliases expected to be served by the CDN.
+    pub aliases: Vec<String>,
+    /// Expected response header patterns such as `via: *CloudFront*`.
+    pub expected_response_headers: Vec<String>,
+}
+
+/// Operations metadata declared by a project manifest.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectOpsSpec {
+    /// Non-secret smoke probes.
+    pub probes: Vec<ProbeSpec>,
+    /// Runtime dependencies that should be verified with this project.
+    pub runtime_dependencies: Vec<RuntimeDependencySpec>,
+    /// Known manual state records to reconcile.
+    pub manual_state: Vec<ManualStateRecord>,
+}
+
+/// Operational smoke probe.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeSpec {
+    /// Probe name.
+    pub name: String,
+    /// HTTP method.
+    pub method: String,
+    /// URL to probe.
+    pub url: String,
+    /// Expected response properties.
+    pub expect: ProbeExpectation,
+    /// Failure class assigned by verification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+}
+
+/// Expected probe result.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeExpectation {
+    /// Expected status code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Header match patterns keyed by header name.
+    pub headers: BTreeMap<String, String>,
+    /// Body substring expected in a non-secret response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_contains: Option<String>,
+}
+
+/// Runtime dependency that should be healthy before declaring an operation complete.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDependencySpec {
+    /// Depended-on project id.
+    pub project: ProjectName,
+    /// Dependency endpoint.
+    pub endpoint: String,
+    /// Human-readable purpose.
+    pub purpose: String,
+}
+
+/// Manual cloud or infrastructure state that must be reconciled back into `IaC`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualStateRecord {
+    /// Stable manual action kind.
+    pub kind: String,
+    /// Resource identifier.
+    pub resource: String,
+    /// Current reconciliation status.
+    pub status: String,
+    /// Managed equivalent when `IaC` now owns the state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_equivalent: Option<String>,
+    /// Cleanup command in argv form when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_command: Option<ProcessCommand>,
+}
+
 /// Project AI edit policy.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -825,6 +939,12 @@ pub struct ProjectManifest {
     pub iac: Option<IacSpec>,
     /// Optional deployment specification.
     pub deploy: Option<DeploySpec>,
+    /// Optional DNS intent.
+    pub dns: ProjectDnsSpec,
+    /// Optional CDN intent.
+    pub cdn: Option<CdnSpec>,
+    /// Optional operations metadata.
+    pub ops: ProjectOpsSpec,
     /// Optional proto specification.
     pub protos: ProjectProtoSpec,
     /// Optional AI policy specification.
@@ -1923,6 +2043,308 @@ pub struct IacFacadeReport {
     pub commands: Vec<ProcessCommand>,
     /// Risk flags.
     pub risk_flags: Vec<String>,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Request for an operations plan.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsPlanRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
+    /// Explicit changed files.
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Target environment names.
+    pub environments: Vec<String>,
+    /// Requested task names.
+    pub tasks: Vec<TaskName>,
+    /// Optional plan output path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<PathBuf>,
+}
+
+/// Operations plan for day-2 infrastructure work.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsPlan {
+    /// Stable plan id.
+    pub id: String,
+    /// Repository root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<RepoRoot>,
+    /// Optional base git ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// Optional head git ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Planned environments.
+    pub environments: Vec<String>,
+    /// Affected report used to build the plan.
+    pub affected: AffectedReport,
+    /// Deduplicated task dry-run report.
+    pub task_plan: TaskRunReport,
+    /// Ordered `IaC` operations.
+    pub iac: Vec<IacOperation>,
+    /// DNS verification operations.
+    pub dns: Vec<DnsOperation>,
+    /// CDN checks.
+    pub cdn: Vec<CdnCheck>,
+    /// Provider capability diagnostics.
+    pub provider_capabilities: Vec<ProviderCapabilityReport>,
+    /// Runtime smoke probes.
+    pub probes: Vec<ProbeSpec>,
+    /// Manual-state reconciliation records.
+    pub manual_reconciliation: Vec<ManualStateRecord>,
+    /// Required environment variable names.
+    pub required_env: Vec<String>,
+    /// Unresolved production gaps.
+    pub production_gaps: Vec<String>,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// One `IaC` operation in an operations plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IacOperation {
+    /// Project id when the operation belongs to a project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectName>,
+    /// `IaC` workspace or root.
+    pub workspace: String,
+    /// `IaC` provider.
+    pub provider: IacProvider,
+    /// Environment or stack name.
+    pub environment: String,
+    /// Stack name.
+    pub stack: String,
+    /// Non-mutating preview command.
+    pub preview_command: ProcessCommand,
+    /// Mutating apply command, gated and not run by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_command: Option<ProcessCommand>,
+    /// Risk flags.
+    pub risk: Vec<String>,
+}
+
+/// DNS verification operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsOperation {
+    /// Zone name inferred from the record.
+    pub zone: String,
+    /// DNS provider.
+    pub provider: String,
+    /// Record name.
+    pub record: String,
+    /// Expected target.
+    pub expected_target: String,
+    /// Expected proxied setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_proxied: Option<bool>,
+    /// Verification commands.
+    pub verification: Vec<ProcessCommand>,
+}
+
+/// CDN serving-layer check.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CdnCheck {
+    /// CDN provider.
+    pub provider: String,
+    /// Alias checked.
+    pub alias: String,
+    /// Header patterns that should prove serving layer.
+    pub expected_response_headers: Vec<String>,
+    /// Verification command.
+    pub verification: ProcessCommand,
+}
+
+/// Request for non-mutating operations verification.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsVerifyRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Plan JSON path.
+    pub plan: PathBuf,
+}
+
+/// Operations verification report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsVerifyReport {
+    /// Commands that are safe to run for verification.
+    pub commands: Vec<ProcessCommand>,
+    /// Mutating commands intentionally skipped.
+    pub skipped_mutating_commands: Vec<ProcessCommand>,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Request for manual-state reconciliation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsReconcileRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Plan JSON path.
+    pub plan: PathBuf,
+}
+
+/// Manual-state reconciliation report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsReconcileReport {
+    /// Manual state records from the plan.
+    pub records: Vec<ManualStateRecord>,
+    /// Cleanup commands for unreconciled temporary state.
+    pub cleanup_commands: Vec<ProcessCommand>,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Request for provider capability diagnostics.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapabilityRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Workspace selector in `project:workspace` form or repo-relative path form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Optional base git ref.
+    pub base: Option<String>,
+    /// Optional head git ref.
+    pub head: Option<String>,
+    /// Explicit changed files.
+    pub changed_files: Vec<RepoRelativePath>,
+}
+
+/// Provider capability diagnostic.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapabilityReport {
+    /// Workspace selector or path.
+    pub workspace: String,
+    /// Provider package name.
+    pub package: String,
+    /// Installed or declared package version.
+    pub version: String,
+    /// Resource with a known capability gap.
+    pub resource: String,
+    /// Field with a known capability gap.
+    pub field: String,
+    /// Diagnostic status.
+    pub status: String,
+    /// Operator advice.
+    pub advice: String,
+    /// Diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Local operations session journal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionJournal {
+    /// Session id.
+    pub id: String,
+    /// Human-readable session name.
+    pub name: String,
+    /// Associated operations plan id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    /// Journal entries.
+    pub entries: Vec<SessionEntry>,
+}
+
+/// One operations session entry.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEntry {
+    /// Entry kind.
+    pub kind: String,
+    /// Unix timestamp in seconds.
+    pub timestamp: u64,
+    /// Redacted command text when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Exit status when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_status: Option<i32>,
+    /// Redacted message or selected evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Associated plan id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+}
+
+/// Journal command request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsJournalRequest {
+    /// Optional starting path or explicit repo root.
+    pub repo: Option<PathBuf>,
+    /// Journal action.
+    pub action: OpsJournalAction,
+}
+
+/// Journal action.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum OpsJournalAction {
+    /// Start a journal.
+    Start {
+        /// Session name.
+        name: String,
+        /// Optional plan id.
+        plan_id: Option<String>,
+    },
+    /// Add a command entry.
+    AddCommand {
+        /// Session id or name.
+        session: String,
+        /// Command text.
+        command: String,
+        /// Optional exit status.
+        exit_status: Option<i32>,
+    },
+    /// Add a note entry.
+    AddNote {
+        /// Session id or name.
+        session: String,
+        /// Note kind.
+        note_kind: String,
+        /// Note message.
+        message: String,
+    },
+    /// Render a summary.
+    Summary {
+        /// Session id or name.
+        session: String,
+    },
+}
+
+/// Journal command report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpsJournalReport {
+    /// Journal path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Current journal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal: Option<SessionJournal>,
+    /// Markdown summary when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
     /// Diagnostics.
     pub diagnostics: Vec<Diagnostic>,
 }

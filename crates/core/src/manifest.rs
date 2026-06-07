@@ -8,12 +8,14 @@ use serde::Deserialize;
 use crate::{
     diagnostic::{Diagnostic, RepoctlError},
     domain::{
-        CommandSpec, DeploySpec, GeneratedCodePolicy, IacProvider, IacSpec, OwnerHandle,
-        PolicyMode, ProjectAiSpec, ProjectAreas, ProjectDependency, ProjectKind, ProjectManifest,
-        ProjectName, ProjectProtoSpec, ProjectRelativePath, RepoGlob, RepoLayout, RepoManifest,
-        RepoName, RepoPolicySet, RepoRelativePath, SchemaId, TaskCommand, TaskDependency, TaskName,
-        TemplateFile, TemplateInput, TemplateManifest, Toolchain, Visibility, WorkspaceLanguage,
-        WorkspaceName, WorkspaceSpec,
+        CdnSpec, CommandSpec, DeploySpec, GeneratedCodePolicy, IacProvider, IacSpec,
+        ManualStateRecord, OwnerHandle, PolicyMode, ProbeExpectation, ProbeSpec, ProcessCommand,
+        ProjectAiSpec, ProjectAreas, ProjectDependency, ProjectDnsSpec, ProjectKind,
+        ProjectManifest, ProjectName, ProjectOpsSpec, ProjectProtoSpec, ProjectRelativePath,
+        RepoGlob, RepoLayout, RepoManifest, RepoName, RepoPolicySet, RepoRelativePath,
+        RuntimeDependencySpec, SchemaId, TaskCommand, TaskDependency, TaskName, TemplateFile,
+        TemplateInput, TemplateManifest, Toolchain, Visibility, WorkspaceLanguage, WorkspaceName,
+        WorkspaceSpec,
     },
     ports::ManifestParser,
 };
@@ -25,6 +27,8 @@ const TASK_LIMIT: usize = 128;
 const TASK_COMMAND_LIMIT: usize = 64;
 const DEPENDENCY_LIMIT: usize = 256;
 const PATTERN_LIMIT: usize = 256;
+const OPS_RECORD_LIMIT: usize = 128;
+const OPS_TEXT_MAX_BYTES: usize = 512;
 const TEMPLATE_INPUT_LIMIT: usize = 64;
 const TEMPLATE_FILE_LIMIT: usize = 512;
 
@@ -339,6 +343,12 @@ struct RawProjectManifest {
     #[serde(default)]
     deploy: Option<RawDeploySpec>,
     #[serde(default)]
+    dns: RawProjectDnsSpec,
+    #[serde(default)]
+    cdn: Option<RawCdnSpec>,
+    #[serde(default)]
+    ops: RawProjectOpsSpec,
+    #[serde(default)]
     protos: RawProjectProtoSpec,
     #[serde(default)]
     ai: RawProjectAiSpec,
@@ -403,6 +413,100 @@ struct RawDeploySpec {
     root: String,
     #[serde(default)]
     environments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawProjectDnsSpec {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    records: Vec<RawDnsRecordSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawDnsRecordSpec {
+    name: String,
+    #[serde(rename = "type")]
+    record_type: String,
+    #[serde(default)]
+    target: Option<RawDnsTargetSpec>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    proxied: Option<bool>,
+    #[serde(default)]
+    ttl: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawDnsTargetSpec {
+    kind: String,
+    output: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawCdnSpec {
+    provider: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    expected_response_headers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawProjectOpsSpec {
+    #[serde(default)]
+    probes: Vec<RawProbeSpec>,
+    #[serde(default)]
+    runtime_dependencies: Vec<RawRuntimeDependencySpec>,
+    #[serde(default)]
+    manual_state: Vec<RawManualStateRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawProbeSpec {
+    name: String,
+    method: String,
+    url: String,
+    #[serde(default)]
+    expect: RawProbeExpectation,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawProbeExpectation {
+    #[serde(default)]
+    status: Option<u16>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    body_contains: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawRuntimeDependencySpec {
+    project: String,
+    endpoint: String,
+    purpose: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawManualStateRecord {
+    kind: String,
+    resource: String,
+    status: String,
+    #[serde(default)]
+    managed_equivalent: Option<String>,
+    #[serde(default)]
+    cleanup_command: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -507,6 +611,9 @@ impl RawProjectManifest {
             tasks,
             iac: self.iac.map(RawIacSpec::into_domain).transpose()?,
             deploy: self.deploy.map(RawDeploySpec::into_domain).transpose()?,
+            dns: self.dns.into_domain()?,
+            cdn: self.cdn.map(RawCdnSpec::into_domain).transpose()?,
+            ops: self.ops.into_domain()?,
             protos: self.protos.into_domain()?,
             ai: self.ai.into_domain()?,
             areas: ProjectAreas {
@@ -614,6 +721,199 @@ impl RawDeploySpec {
         Ok(DeploySpec {
             root: ProjectRelativePath::new(self.root)?,
             environments: self.environments,
+        })
+    }
+}
+
+impl RawProjectDnsSpec {
+    fn into_domain(self) -> Result<ProjectDnsSpec, Diagnostic> {
+        if let Some(provider) = &self.provider {
+            validate_ops_text("dns provider", provider)?;
+        }
+        Ok(ProjectDnsSpec {
+            provider: self.provider,
+            records: bounded_vec(self.records, OPS_RECORD_LIMIT, "manifest.dns.too_many")?
+                .into_iter()
+                .map(RawDnsRecordSpec::into_domain)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+impl RawDnsRecordSpec {
+    fn into_domain(self) -> Result<crate::domain::DnsRecordSpec, Diagnostic> {
+        validate_ops_text("dns record", &self.name)?;
+        validate_ops_text("dns record type", &self.record_type)?;
+        let target = match (self.target, self.value) {
+            (Some(target), None) => target.into_domain()?,
+            (None, Some(value)) => {
+                validate_ops_text("dns target", &value)?;
+                value
+            }
+            (None, None) => {
+                return Err(Diagnostic::error(
+                    "manifest.dns.target_missing",
+                    "dns records require either target or value",
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(Diagnostic::error(
+                    "manifest.dns.target_ambiguous",
+                    "dns records cannot declare both target and value",
+                ));
+            }
+        };
+        Ok(crate::domain::DnsRecordSpec {
+            name: self.name,
+            record_type: self.record_type,
+            target,
+            proxied: self.proxied,
+            ttl: self.ttl,
+        })
+    }
+}
+
+impl RawDnsTargetSpec {
+    fn into_domain(self) -> Result<String, Diagnostic> {
+        validate_ops_text("dns target kind", &self.kind)?;
+        validate_ops_text("dns target output", &self.output)?;
+        Ok(format!("{}:{}", self.kind, self.output))
+    }
+}
+
+impl RawCdnSpec {
+    fn into_domain(self) -> Result<CdnSpec, Diagnostic> {
+        validate_ops_text("cdn provider", &self.provider)?;
+        let aliases = bounded_vec(self.aliases, OPS_RECORD_LIMIT, "manifest.cdn.too_many")?
+            .into_iter()
+            .map(|alias| {
+                validate_ops_text("cdn alias", &alias)?;
+                Ok(alias)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_response_headers = bounded_vec(
+            self.expected_response_headers,
+            OPS_RECORD_LIMIT,
+            "manifest.cdn.header_too_many",
+        )?
+        .into_iter()
+        .map(|header| {
+            validate_ops_text("cdn expected header", &header)?;
+            Ok(header)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(CdnSpec {
+            provider: self.provider,
+            aliases,
+            expected_response_headers,
+        })
+    }
+}
+
+impl RawProjectOpsSpec {
+    fn into_domain(self) -> Result<ProjectOpsSpec, Diagnostic> {
+        Ok(ProjectOpsSpec {
+            probes: bounded_vec(self.probes, OPS_RECORD_LIMIT, "manifest.ops.probe_too_many")?
+                .into_iter()
+                .map(RawProbeSpec::into_domain)
+                .collect::<Result<Vec<_>, _>>()?,
+            runtime_dependencies: bounded_vec(
+                self.runtime_dependencies,
+                OPS_RECORD_LIMIT,
+                "manifest.ops.runtime_dependency_too_many",
+            )?
+            .into_iter()
+            .map(RawRuntimeDependencySpec::into_domain)
+            .collect::<Result<Vec<_>, _>>()?,
+            manual_state: bounded_vec(
+                self.manual_state,
+                OPS_RECORD_LIMIT,
+                "manifest.ops.manual_state_too_many",
+            )?
+            .into_iter()
+            .map(RawManualStateRecord::into_domain)
+            .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+impl RawProbeSpec {
+    fn into_domain(self) -> Result<ProbeSpec, Diagnostic> {
+        validate_ops_text("probe name", &self.name)?;
+        validate_ops_text("probe method", &self.method)?;
+        validate_ops_text("probe url", &self.url)?;
+        Ok(ProbeSpec {
+            name: self.name,
+            method: self.method,
+            url: self.url,
+            expect: self.expect.into_domain()?,
+            classification: None,
+        })
+    }
+}
+
+impl RawProbeExpectation {
+    fn into_domain(self) -> Result<ProbeExpectation, Diagnostic> {
+        let headers = bounded_map(
+            self.headers,
+            OPS_RECORD_LIMIT,
+            "manifest.ops.probe_header_too_many",
+        )?
+        .into_iter()
+        .map(|(name, value)| {
+            validate_ops_text("probe header name", &name)?;
+            validate_ops_text("probe header value", &value)?;
+            Ok((name, value))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+        if let Some(body) = &self.body_contains {
+            validate_ops_text("probe body expectation", body)?;
+        }
+        Ok(ProbeExpectation {
+            status: self.status,
+            headers,
+            body_contains: self.body_contains,
+        })
+    }
+}
+
+impl RawRuntimeDependencySpec {
+    fn into_domain(self) -> Result<RuntimeDependencySpec, Diagnostic> {
+        validate_ops_text("runtime endpoint", &self.endpoint)?;
+        validate_ops_text("runtime dependency purpose", &self.purpose)?;
+        Ok(RuntimeDependencySpec {
+            project: ProjectName::new(self.project)?,
+            endpoint: self.endpoint,
+            purpose: self.purpose,
+        })
+    }
+}
+
+impl RawManualStateRecord {
+    fn into_domain(self) -> Result<ManualStateRecord, Diagnostic> {
+        validate_ops_text("manual state kind", &self.kind)?;
+        validate_ops_text("manual state resource", &self.resource)?;
+        validate_ops_text("manual state status", &self.status)?;
+        if let Some(value) = &self.managed_equivalent {
+            validate_ops_text("manual state managed equivalent", value)?;
+        }
+        let cleanup_command = self
+            .cleanup_command
+            .map(|command| {
+                let spec = CommandSpec::parse(&command)?;
+                Ok(ProcessCommand {
+                    program: spec.program,
+                    args: spec.args,
+                    ..ProcessCommand::default()
+                })
+            })
+            .transpose()?;
+        Ok(ManualStateRecord {
+            kind: self.kind,
+            resource: self.resource,
+            status: self.status,
+            managed_equivalent: self.managed_equivalent,
+            cleanup_command,
         })
     }
 }
@@ -929,6 +1229,22 @@ fn validate_template_identifier(value: &str) -> Result<(), Diagnostic> {
         return Err(Diagnostic::error(
             "manifest.template.input_name",
             "template input names must use lowercase snake_case",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ops_text(label: &str, value: &str) -> Result<(), Diagnostic> {
+    if value.is_empty() || value.len() > OPS_TEXT_MAX_BYTES {
+        return Err(Diagnostic::error(
+            "manifest.ops.text_invalid",
+            format!("{label} must be non-empty and length-bounded"),
+        ));
+    }
+    if value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(Diagnostic::error(
+            "manifest.ops.text_invalid",
+            format!("{label} cannot contain control characters"),
         ));
     }
     Ok(())

@@ -550,7 +550,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "repoctl"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "camino",
  "repoctl-core",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "repoctl-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "repoctl-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "camino",
  "globset",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "repoctl-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "camino",
  "cargo_metadata",
@@ -605,19 +605,20 @@ dependencies = [
 
 [[package]]
 name = "repoctl-runner"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "camino",
  "globset",
  "repoctl-core",
  "repoctl-engine",
+ "serde",
  "serde_json",
  "tempfile",
 ]
 
 [[package]]
 name = "repoctl-scaffold"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "camino",
  "minijinja",

@@ -11,21 +11,29 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
+    fs,
+    path::{Path, PathBuf},
     process::Command,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use globset::Glob;
 use repoctl_core::{
-    AffectedReason, AffectedReport, AffectedRequest, AiContext, AiContextRequest, CiFallback,
-    CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic, EdgeKind,
-    IacFacadeReport, IacFacadeRequest, IacProvider, PrSummary, PrSummaryRequest, ProcessCommand,
-    ProcessOutput, ProcessRunner, ProjectManifest, ProjectName, ProtoFacadeReport,
-    ProtoFacadeRequest, ProtoOperation, RepoRelativePath, RepoSnapshot, RepoctlError,
-    TaskCommandOutput, TaskDependency, TaskName, TaskRunPlan, TaskRunReport, TaskRunRequest,
-    Toolchain, ToolchainAdapter, ToolchainEnvironmentInput,
+    AffectedReason, AffectedReport, AffectedRequest, AiContext, AiContextRequest, CdnCheck,
+    CiFallback, CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest,
+    Diagnostic, DnsOperation, EdgeKind, IacFacadeReport, IacFacadeRequest, IacOperation,
+    IacProvider, ManualStateRecord, OpsJournalAction, OpsJournalReport, OpsJournalRequest, OpsPlan,
+    OpsPlanRequest, OpsReconcileReport, OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest,
+    PrSummary, PrSummaryRequest, ProbeSpec, ProcessCommand, ProcessOutput, ProcessRunner,
+    ProjectManifest, ProjectName, ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation,
+    ProviderCapabilityReport, ProviderCapabilityRequest, RepoRelativePath, RepoSnapshot,
+    RepoctlError, SessionEntry, SessionJournal, TaskCommandOutput, TaskDependency, TaskName,
+    TaskRunPlan, TaskRunReport, TaskRunRequest, Toolchain, ToolchainAdapter,
+    ToolchainEnvironmentInput,
 };
 use repoctl_engine::RepoctlEngine;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 /// Provides changed files for a git range.
@@ -342,10 +350,15 @@ impl RunnerService {
     pub fn run_tasks(&self, request: &TaskRunRequest) -> Result<TaskRunReport, RepoctlError> {
         let plan = self.plan_tasks(request)?;
         if request.dry_run {
+            let diagnostics = if plan.commands.is_empty() {
+                self.no_task_plan_diagnostics(request)?
+            } else {
+                Vec::new()
+            };
             return Ok(TaskRunReport {
                 commands: plan.commands,
                 outputs: Vec::new(),
-                diagnostics: Vec::new(),
+                diagnostics,
             });
         }
         let mut diagnostics = Vec::new();
@@ -603,11 +616,21 @@ impl RunnerService {
         )?;
         let affected = compute_affected(&snapshot, &changed_files, &[]);
         let diagnostics = self.engine.policies().evaluate(&snapshot, &changed_files)?;
+        let dns = ops_dns_operations(&snapshot, &affected);
+        let cdn = ops_cdn_checks(&snapshot, &affected);
+        let provider_capabilities = provider_capability_reports(&snapshot, None, &changed_files)?;
+        let production_gaps = ops_production_gaps(&snapshot);
         Ok(render_pr_summary(
             &snapshot,
             &changed_files,
             &affected,
             &diagnostics,
+            &PrOperationalContext {
+                dns,
+                cdn,
+                provider_capabilities,
+                production_gaps,
+            },
         ))
     }
 
@@ -638,9 +661,281 @@ impl RunnerService {
         })
     }
 
+    /// Builds a non-mutating operations plan.
+    pub fn ops_plan(&self, request: &OpsPlanRequest) -> Result<OpsPlan, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        let changed_files = self.changed_files(
+            request.repo.as_deref(),
+            request.base.as_deref(),
+            request.head.as_deref(),
+            &request.changed_files,
+        )?;
+        let environments = if request.environments.is_empty() {
+            vec!["staging".to_string()]
+        } else {
+            request.environments.clone()
+        };
+        let affected = compute_affected(&snapshot, &changed_files, &request.tasks);
+        let task_request = TaskRunRequest {
+            repo: request.repo.clone(),
+            tasks: request.tasks.clone(),
+            projects: Vec::new(),
+            workspaces: Vec::new(),
+            affected: true,
+            changed_files: changed_files.clone(),
+            base: request.base.clone(),
+            head: request.head.clone(),
+            concurrency: None,
+            dry_run: true,
+        };
+        let task_plan = self.run_tasks(&task_request)?;
+        let iac = ops_iac_operations(&snapshot, &affected, &changed_files, &environments)?;
+        let dns = ops_dns_operations(&snapshot, &affected);
+        let cdn = ops_cdn_checks(&snapshot, &affected);
+        let probes = ops_probes(&snapshot, &affected);
+        let manual_reconciliation = ops_manual_state(&snapshot, &affected);
+        let provider_capabilities = provider_capability_reports(&snapshot, None, &changed_files)?;
+        let diagnostics = ops_plan_diagnostics(
+            request,
+            &changed_files,
+            &affected,
+            &task_plan,
+            &dns,
+            &cdn,
+            &provider_capabilities,
+        );
+        let plan = OpsPlan {
+            id: new_artifact_id("ops-plan")?,
+            repo_root: Some(snapshot.root.clone()),
+            base: request.base.clone(),
+            head: request.head.clone(),
+            environments,
+            affected,
+            task_plan,
+            iac,
+            dns,
+            cdn,
+            provider_capabilities,
+            probes,
+            manual_reconciliation,
+            required_env: vec![
+                "AWS_PROFILE".to_string(),
+                "AWS_REGION".to_string(),
+                "AWS_DEFAULT_REGION".to_string(),
+                "CLOUDFLARE_API_TOKEN".to_string(),
+                "CLOUDFLARE_ZONE_ID".to_string(),
+            ],
+            production_gaps: ops_production_gaps(&snapshot),
+            diagnostics,
+        };
+        if let Some(path) = &request.output {
+            write_json_artifact(path, &plan)?;
+        }
+        Ok(plan)
+    }
+
+    /// Plans non-mutating verification from an operations plan.
+    pub fn ops_verify(&self, request: &OpsVerifyRequest) -> Result<OpsVerifyReport, RepoctlError> {
+        let plan = read_json_artifact::<OpsPlan>(&request.plan)?;
+        let mut commands = vec![
+            ProcessCommand {
+                program: "repoctl".to_string(),
+                args: vec!["graph".to_string(), "validate".to_string()],
+                ..ProcessCommand::default()
+            },
+            ProcessCommand {
+                program: "repoctl".to_string(),
+                args: ops_affected_args(&plan),
+                ..ProcessCommand::default()
+            },
+        ];
+        commands.extend(plan.task_plan.commands.clone());
+        commands.extend(
+            plan.iac
+                .iter()
+                .map(|operation| operation.preview_command.clone()),
+        );
+        commands.extend(
+            plan.dns
+                .iter()
+                .flat_map(|operation| operation.verification.clone()),
+        );
+        commands.extend(plan.cdn.iter().map(|check| check.verification.clone()));
+        commands.extend(plan.probes.iter().map(probe_command));
+        let skipped_mutating_commands = plan
+            .iac
+            .iter()
+            .filter_map(|operation| operation.apply_command.clone())
+            .chain(
+                plan.manual_reconciliation
+                    .iter()
+                    .filter_map(|record| record.cleanup_command.clone()),
+            )
+            .collect::<Vec<_>>();
+        Ok(OpsVerifyReport {
+            commands,
+            skipped_mutating_commands,
+            diagnostics: Vec::new(),
+        })
+    }
+
+    /// Builds manual-state reconciliation report from an operations plan.
+    pub fn ops_reconcile(
+        &self,
+        request: &OpsReconcileRequest,
+    ) -> Result<OpsReconcileReport, RepoctlError> {
+        let plan = read_json_artifact::<OpsPlan>(&request.plan)?;
+        let cleanup_commands = plan
+            .manual_reconciliation
+            .iter()
+            .filter(|record| record.status != "removed" && record.status != "reconciled")
+            .filter_map(|record| record.cleanup_command.clone())
+            .collect::<Vec<_>>();
+        let diagnostics = if plan.manual_reconciliation.is_empty() {
+            vec![Diagnostic::warning(
+                "ops.reconcile.no_manual_state",
+                "the plan does not record manual state to reconcile",
+            )]
+        } else if cleanup_commands.is_empty() {
+            Vec::new()
+        } else {
+            vec![Diagnostic::warning(
+                "ops.reconcile.cleanup_pending",
+                "temporary manual state still has cleanup commands to review",
+            )]
+        };
+        Ok(OpsReconcileReport {
+            records: plan.manual_reconciliation,
+            cleanup_commands,
+            diagnostics,
+        })
+    }
+
+    /// Inspects provider package capabilities for selected workspaces.
+    pub fn provider_capabilities(
+        &self,
+        request: &ProviderCapabilityRequest,
+    ) -> Result<Vec<ProviderCapabilityReport>, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        let changed_files = self.changed_files(
+            request.repo.as_deref(),
+            request.base.as_deref(),
+            request.head.as_deref(),
+            &request.changed_files,
+        )?;
+        provider_capability_reports(&snapshot, request.workspace.as_deref(), &changed_files)
+    }
+
+    /// Manages local operations session journals.
+    pub fn ops_journal(
+        &self,
+        request: &OpsJournalRequest,
+    ) -> Result<OpsJournalReport, RepoctlError> {
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        let session_dir = snapshot
+            .root
+            .absolute
+            .join("target/repoctl/sessions")
+            .as_std_path()
+            .to_path_buf();
+        fs::create_dir_all(&session_dir).map_err(|source| {
+            RepoctlError::Environment(format!(
+                "failed to create session directory `{}`: {source}",
+                session_dir.display()
+            ))
+        })?;
+        match &request.action {
+            OpsJournalAction::Start { name, plan_id } => {
+                let journal = SessionJournal {
+                    id: new_artifact_id("session")?,
+                    name: sanitize_session_name(name),
+                    plan_id: plan_id.clone(),
+                    entries: Vec::new(),
+                };
+                let path = session_dir.join(format!("{}.json", journal.id));
+                write_json_artifact(&path, &journal)?;
+                Ok(OpsJournalReport {
+                    path: Some(path),
+                    journal: Some(journal),
+                    markdown: None,
+                    diagnostics: Vec::new(),
+                })
+            }
+            OpsJournalAction::AddCommand {
+                session,
+                command,
+                exit_status,
+            } => {
+                let (path, mut journal) = load_session_journal(&session_dir, session)?;
+                journal.entries.push(SessionEntry {
+                    kind: "command".to_string(),
+                    timestamp: unix_timestamp()?,
+                    command: Some(redact_secret_like_values(command)),
+                    exit_status: *exit_status,
+                    message: None,
+                    plan_id: journal.plan_id.clone(),
+                });
+                write_json_artifact(&path, &journal)?;
+                Ok(OpsJournalReport {
+                    path: Some(path),
+                    journal: Some(journal),
+                    markdown: None,
+                    diagnostics: Vec::new(),
+                })
+            }
+            OpsJournalAction::AddNote {
+                session,
+                note_kind,
+                message,
+            } => {
+                let (path, mut journal) = load_session_journal(&session_dir, session)?;
+                journal.entries.push(SessionEntry {
+                    kind: note_kind.clone(),
+                    timestamp: unix_timestamp()?,
+                    command: None,
+                    exit_status: None,
+                    message: Some(redact_secret_like_values(message)),
+                    plan_id: journal.plan_id.clone(),
+                });
+                write_json_artifact(&path, &journal)?;
+                Ok(OpsJournalReport {
+                    path: Some(path),
+                    journal: Some(journal),
+                    markdown: None,
+                    diagnostics: Vec::new(),
+                })
+            }
+            OpsJournalAction::Summary { session } => {
+                let (path, journal) = load_session_journal(&session_dir, session)?;
+                let markdown = render_session_summary(&journal);
+                Ok(OpsJournalReport {
+                    path: Some(path),
+                    journal: Some(journal),
+                    markdown: Some(markdown),
+                    diagnostics: Vec::new(),
+                })
+            }
+        }
+    }
+
     fn changed_files(
         &self,
-        repo: Option<&std::path::Path>,
+        repo: Option<&Path>,
         base: Option<&str>,
         head: Option<&str>,
         explicit: &[RepoRelativePath],
@@ -652,6 +947,62 @@ impl RunnerService {
             (Some(base), Some(head)) => self.git.changed_files(repo, base, head),
             _ => Ok(Vec::new()),
         }
+    }
+
+    fn no_task_plan_diagnostics(
+        &self,
+        request: &TaskRunRequest,
+    ) -> Result<Vec<Diagnostic>, RepoctlError> {
+        if request.affected
+            && request.changed_files.is_empty()
+            && (request.base.is_none() || request.head.is_none())
+        {
+            return Ok(vec![Diagnostic::warning(
+                "task.plan.no_base_head",
+                "affected task planning requires --base and --head or --changed-file",
+            )]);
+        }
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
+        if request.affected {
+            let changed_files = self.changed_files(
+                request.repo.as_deref(),
+                request.base.as_deref(),
+                request.head.as_deref(),
+                &request.changed_files,
+            )?;
+            if changed_files.is_empty() {
+                return Ok(vec![Diagnostic::warning(
+                    "task.plan.no_changed_files",
+                    "no changed files were found for affected task planning",
+                )]);
+            }
+            let affected = compute_affected(&snapshot, &changed_files, &request.tasks);
+            if affected.directly_affected.is_empty() && affected.transitively_affected.is_empty() {
+                return Ok(vec![Diagnostic::warning(
+                    "task.plan.no_affected_projects",
+                    "changed files did not match any project or graph-wide surface",
+                )]);
+            }
+            if affected.tasks.is_empty() {
+                return Ok(vec![Diagnostic::warning(
+                    "task.plan.no_matching_task",
+                    "affected projects do not declare the requested task",
+                )]);
+            }
+            return Ok(vec![Diagnostic::error(
+                "task.plan.unresolved_command",
+                "affected report included task ids, but no runnable command could be resolved",
+            )]);
+        }
+        Ok(vec![Diagnostic::warning(
+            "task.plan.no_matching_task",
+            "no project or workspace declares the requested task",
+        )])
     }
 }
 
@@ -774,6 +1125,696 @@ impl IacProviderAdapter for OpenTofuIacProviderAdapter {
     }
 }
 
+fn ops_iac_operations(
+    snapshot: &RepoSnapshot,
+    affected: &AffectedReport,
+    changed_files: &[RepoRelativePath],
+    environments: &[String],
+) -> Result<Vec<IacOperation>, RepoctlError> {
+    let affected_projects = affected_project_set(affected);
+    let mut operations = Vec::new();
+    if changed_files.iter().any(|file| {
+        file.as_str()
+            .starts_with(snapshot.repo_manifest.core_infra_root.as_str())
+    }) {
+        for environment in environments {
+            let target = IacTarget {
+                project: None,
+                root: snapshot.repo_manifest.core_infra_root.clone(),
+                provider: IacProvider::Pulumi,
+                stack: environment.clone(),
+                core: true,
+            };
+            operations.push(iac_operation(
+                snapshot,
+                &target,
+                environment,
+                changed_files,
+            )?);
+        }
+    }
+    let mut projects = snapshot
+        .projects
+        .iter()
+        .filter(|project| affected_projects.contains(&project.name))
+        .filter(|project| project.iac.is_some())
+        .collect::<Vec<_>>();
+    projects.sort_by_key(|project| (ops_project_rank(project), project.name.to_string()));
+    for project in projects {
+        let Some(iac) = &project.iac else {
+            continue;
+        };
+        let root = project
+            .path
+            .join_project(&iac.root)
+            .map_err(RepoctlError::diagnostic)?;
+        for environment in environments {
+            let target = IacTarget {
+                project: Some(project),
+                root: root.clone(),
+                provider: iac.provider.clone(),
+                stack: environment.clone(),
+                core: false,
+            };
+            operations.push(iac_operation(
+                snapshot,
+                &target,
+                environment,
+                changed_files,
+            )?);
+        }
+    }
+    Ok(operations)
+}
+
+fn iac_operation(
+    snapshot: &RepoSnapshot,
+    target: &IacTarget<'_>,
+    environment: &str,
+    changed_files: &[RepoRelativePath],
+) -> Result<IacOperation, RepoctlError> {
+    let preview_command = iac_plan_command(snapshot, target)?;
+    let apply_command = Some(iac_apply_command(snapshot, target));
+    Ok(IacOperation {
+        project: target.project.map(|project| project.name.clone()),
+        workspace: target.root.to_string(),
+        provider: target.provider.clone(),
+        environment: environment.to_string(),
+        stack: target.stack.clone(),
+        preview_command,
+        apply_command,
+        risk: iac_risk_flags(std::slice::from_ref(target), changed_files),
+    })
+}
+
+fn iac_apply_command(snapshot: &RepoSnapshot, target: &IacTarget<'_>) -> ProcessCommand {
+    match target.provider {
+        IacProvider::Pulumi => iac_command(
+            snapshot,
+            target,
+            "pulumi",
+            vec![
+                "up".to_string(),
+                "--stack".to_string(),
+                target.stack.clone(),
+                "--yes".to_string(),
+            ],
+        ),
+        IacProvider::Terraform => iac_command(
+            snapshot,
+            target,
+            "terraform",
+            vec![
+                "apply".to_string(),
+                "-var".to_string(),
+                format!("env={}", target.stack),
+                "-auto-approve".to_string(),
+            ],
+        ),
+        IacProvider::OpenTofu => iac_command(
+            snapshot,
+            target,
+            "tofu",
+            vec![
+                "apply".to_string(),
+                "-var".to_string(),
+                format!("env={}", target.stack),
+                "-auto-approve".to_string(),
+            ],
+        ),
+    }
+}
+
+fn ops_dns_operations(snapshot: &RepoSnapshot, affected: &AffectedReport) -> Vec<DnsOperation> {
+    selected_projects(snapshot, affected)
+        .into_iter()
+        .flat_map(|project| {
+            let provider = project
+                .dns
+                .provider
+                .clone()
+                .unwrap_or_else(|| "dns".to_string());
+            project
+                .dns
+                .records
+                .iter()
+                .map(|record| DnsOperation {
+                    zone: infer_dns_zone(&record.name),
+                    provider: provider.clone(),
+                    record: record.name.clone(),
+                    expected_target: record.target.clone(),
+                    expected_proxied: record.proxied,
+                    verification: dns_verification_commands(&provider, record),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn dns_verification_commands(
+    provider: &str,
+    record: &repoctl_core::DnsRecordSpec,
+) -> Vec<ProcessCommand> {
+    let mut commands = vec![ProcessCommand {
+        program: "dig".to_string(),
+        args: vec![
+            "+short".to_string(),
+            record.record_type.clone(),
+            record.name.clone(),
+        ],
+        ..ProcessCommand::default()
+    }];
+    if provider == "cloudflare" {
+        commands.push(ProcessCommand {
+            program: "curl".to_string(),
+            args: vec![
+                "--fail".to_string(),
+                "--silent".to_string(),
+                "--show-error".to_string(),
+                "-H".to_string(),
+                "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}".to_string(),
+                format!(
+                    "https://api.cloudflare.com/client/v4/zones/${{CLOUDFLARE_ZONE_ID}}/dns_records?name={}",
+                    record.name
+                ),
+            ],
+            ..ProcessCommand::default()
+        });
+    }
+    commands
+}
+
+fn ops_cdn_checks(snapshot: &RepoSnapshot, affected: &AffectedReport) -> Vec<CdnCheck> {
+    selected_projects(snapshot, affected)
+        .into_iter()
+        .filter_map(|project| project.cdn.as_ref())
+        .flat_map(|cdn| {
+            cdn.aliases
+                .iter()
+                .map(|alias| CdnCheck {
+                    provider: cdn.provider.clone(),
+                    alias: alias.clone(),
+                    expected_response_headers: cdn.expected_response_headers.clone(),
+                    verification: ProcessCommand {
+                        program: "curl".to_string(),
+                        args: vec![
+                            "--head".to_string(),
+                            "--fail".to_string(),
+                            "--silent".to_string(),
+                            "--show-error".to_string(),
+                            format!("https://{alias}"),
+                        ],
+                        ..ProcessCommand::default()
+                    },
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn ops_probes(snapshot: &RepoSnapshot, affected: &AffectedReport) -> Vec<ProbeSpec> {
+    selected_projects(snapshot, affected)
+        .into_iter()
+        .flat_map(|project| project.ops.probes.clone())
+        .collect()
+}
+
+fn ops_manual_state(snapshot: &RepoSnapshot, affected: &AffectedReport) -> Vec<ManualStateRecord> {
+    selected_projects(snapshot, affected)
+        .into_iter()
+        .flat_map(|project| project.ops.manual_state.clone())
+        .collect()
+}
+
+fn selected_projects<'a>(
+    snapshot: &'a RepoSnapshot,
+    affected: &AffectedReport,
+) -> Vec<&'a ProjectManifest> {
+    let mut names = affected_project_set(affected);
+    let runtime_dependencies = snapshot
+        .projects
+        .iter()
+        .filter(|project| names.contains(&project.name))
+        .flat_map(|project| {
+            project
+                .ops
+                .runtime_dependencies
+                .iter()
+                .map(|dependency| dependency.project.clone())
+        })
+        .collect::<Vec<_>>();
+    names.extend(runtime_dependencies);
+    snapshot
+        .projects
+        .iter()
+        .filter(|project| names.contains(&project.name))
+        .collect()
+}
+
+fn affected_project_set(affected: &AffectedReport) -> BTreeSet<ProjectName> {
+    affected
+        .directly_affected
+        .iter()
+        .chain(affected.transitively_affected.iter())
+        .cloned()
+        .collect()
+}
+
+fn ops_project_rank(project: &ProjectManifest) -> u8 {
+    match project.kind {
+        repoctl_core::ProjectKind::CoreInfra | repoctl_core::ProjectKind::CoreInfraComponent => 0,
+        repoctl_core::ProjectKind::Framework => 1,
+        repoctl_core::ProjectKind::FoundationService => 2,
+        repoctl_core::ProjectKind::App => 3,
+        repoctl_core::ProjectKind::ProtoRoot => 4,
+        repoctl_core::ProjectKind::Tool => 5,
+    }
+}
+
+fn infer_dns_zone(record: &str) -> String {
+    let parts = record.split('.').collect::<Vec<_>>();
+    if parts.len() >= 2 {
+        format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1])
+    } else {
+        record.to_string()
+    }
+}
+
+fn probe_command(probe: &ProbeSpec) -> ProcessCommand {
+    let mut args = vec![
+        "--fail-with-body".to_string(),
+        "--silent".to_string(),
+        "--show-error".to_string(),
+        "--request".to_string(),
+        probe.method.clone(),
+    ];
+    args.push(probe.url.clone());
+    ProcessCommand {
+        program: "curl".to_string(),
+        args,
+        ..ProcessCommand::default()
+    }
+}
+
+fn ops_plan_diagnostics(
+    request: &OpsPlanRequest,
+    changed_files: &[RepoRelativePath],
+    affected: &AffectedReport,
+    task_plan: &TaskRunReport,
+    dns: &[DnsOperation],
+    cdn: &[CdnCheck],
+    provider_capabilities: &[ProviderCapabilityReport],
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    if request.changed_files.is_empty()
+        && changed_files.is_empty()
+        && (request.base.is_none() || request.head.is_none())
+    {
+        diagnostics.push(Diagnostic::warning(
+            "ops.plan.no_base_head",
+            "ops plan could not compare a git range without --base/--head or --changed-file",
+        ));
+    }
+    if affected.directly_affected.is_empty() && affected.transitively_affected.is_empty() {
+        diagnostics.push(Diagnostic::warning(
+            "ops.plan.no_affected_projects",
+            "no projects were affected by the selected change set",
+        ));
+    }
+    diagnostics.extend(task_plan.diagnostics.clone());
+    if !dns.is_empty() {
+        diagnostics.push(Diagnostic::warning(
+            "ops.plan.dns_review_required",
+            "DNS intent is present; verify authoritative provider, record target, and proxy mode",
+        ));
+    }
+    if !cdn.is_empty() {
+        diagnostics.push(Diagnostic::warning(
+            "ops.plan.cdn_review_required",
+            "CDN intent is present; verify response headers prove the expected serving layer",
+        ));
+    }
+    diagnostics.extend(
+        provider_capabilities
+            .iter()
+            .flat_map(|report| report.diagnostics.clone()),
+    );
+    diagnostics
+}
+
+fn ops_production_gaps(snapshot: &RepoSnapshot) -> Vec<String> {
+    snapshot
+        .projects
+        .iter()
+        .filter(|project| !project.dns.records.is_empty() || project.cdn.is_some())
+        .filter(|project| {
+            project
+                .iac
+                .as_ref()
+                .is_none_or(|iac| !iac.stacks.iter().any(|stack| stack == "prod"))
+        })
+        .map(|project| {
+            format!(
+                "{} has DNS/CDN intent but no prod IaC stack declared",
+                project.name
+            )
+        })
+        .collect()
+}
+
+fn ops_affected_args(plan: &OpsPlan) -> Vec<String> {
+    let mut args = vec!["affected".to_string()];
+    if let Some(base) = &plan.base {
+        args.push("--base".to_string());
+        args.push(base.clone());
+    }
+    if let Some(head) = &plan.head {
+        args.push("--head".to_string());
+        args.push(head.clone());
+    }
+    args
+}
+
+fn provider_capability_reports(
+    snapshot: &RepoSnapshot,
+    selector: Option<&str>,
+    changed_files: &[RepoRelativePath],
+) -> Result<Vec<ProviderCapabilityReport>, RepoctlError> {
+    let mut reports = Vec::new();
+    for project in &snapshot.projects {
+        for workspace in &project.workspaces {
+            let workspace_id = format!("{}:{}", project.name, workspace.name);
+            let workspace_root = project
+                .path
+                .join_project(&workspace.root)
+                .map_err(RepoctlError::diagnostic)?;
+            if let Some(selector) = selector
+                && selector != workspace_id
+                && selector != workspace_root.as_str()
+            {
+                continue;
+            }
+            let package_json = snapshot
+                .root
+                .absolute
+                .join(workspace_root.as_str())
+                .join("package.json");
+            if !package_json.is_file() {
+                continue;
+            }
+            let Some(version) = package_version(package_json.as_std_path(), "@pulumi/aws")? else {
+                continue;
+            };
+            let uses_function_url_field = workspace_uses_text(
+                snapshot
+                    .root
+                    .absolute
+                    .join(workspace_root.as_str())
+                    .as_std_path(),
+                "invokedViaFunctionUrl",
+            )?;
+            let provider_major_changed = changed_files.iter().any(|file| {
+                file.as_str().ends_with("package.json")
+                    || file.as_str().ends_with("package-lock.json")
+                    || file.as_str().ends_with("pnpm-lock.yaml")
+                    || file.as_str().ends_with("yarn.lock")
+            });
+            if uses_function_url_field && !version_supports_invoked_via_function_url(&version) {
+                reports.push(ProviderCapabilityReport {
+                    workspace: workspace_id,
+                    package: "@pulumi/aws".to_string(),
+                    version,
+                    resource: "aws.lambda.Permission".to_string(),
+                    field: "invokedViaFunctionUrl".to_string(),
+                    status: "missing".to_string(),
+                    advice: "avoid a blind provider major upgrade; use a compatibility adapter or \
+                             preview every impacted stack before upgrading"
+                        .to_string(),
+                    diagnostics: vec![Diagnostic::warning(
+                        "provider.capability.missing",
+                        "local Pulumi AWS package may not support invokedViaFunctionUrl",
+                    )],
+                });
+            } else if provider_major_changed {
+                reports.push(ProviderCapabilityReport {
+                    workspace: workspace_id,
+                    package: "@pulumi/aws".to_string(),
+                    version,
+                    resource: "provider-migration".to_string(),
+                    field: "major-version".to_string(),
+                    status: "review".to_string(),
+                    advice: "run ordered Pulumi previews for all stacks before accepting provider \
+                             migration state churn"
+                        .to_string(),
+                    diagnostics: vec![Diagnostic::warning(
+                        "provider.capability.major_upgrade_review",
+                        "provider package or lockfile changed and may require broad stack previews",
+                    )],
+                });
+            }
+        }
+    }
+    Ok(reports)
+}
+
+fn package_version(path: &Path, package: &str) -> Result<Option<String>, RepoctlError> {
+    let content = fs::read_to_string(path).map_err(|source| {
+        RepoctlError::Environment(format!(
+            "failed to read package manifest `{}`: {source}",
+            path.display()
+        ))
+    })?;
+    let value = serde_json::from_str::<serde_json::Value>(&content).map_err(|source| {
+        RepoctlError::Environment(format!(
+            "failed to parse package manifest `{}`: {source}",
+            path.display()
+        ))
+    })?;
+    Ok(["dependencies", "devDependencies", "peerDependencies"]
+        .into_iter()
+        .find_map(|section| {
+            value
+                .get(section)?
+                .get(package)?
+                .as_str()
+                .map(ToString::to_string)
+        }))
+}
+
+fn version_supports_invoked_via_function_url(version: &str) -> bool {
+    let digits = version
+        .trim_start_matches(|character: char| !character.is_ascii_digit())
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    digits.parse::<u64>().is_ok_and(|major| major >= 7)
+}
+
+fn workspace_uses_text(root: &Path, needle: &str) -> Result<bool, RepoctlError> {
+    if !root.is_dir() {
+        return Ok(false);
+    }
+    for path in source_files(root)? {
+        let content = fs::read_to_string(&path).map_err(|source| {
+            RepoctlError::Environment(format!("failed to read `{}`: {source}", path.display()))
+        })?;
+        if content.contains(needle) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn source_files(root: &Path) -> Result<Vec<PathBuf>, RepoctlError> {
+    let mut files = Vec::new();
+    collect_source_files(root, &mut files)?;
+    Ok(files)
+}
+
+fn collect_source_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), RepoctlError> {
+    for entry in fs::read_dir(root).map_err(|source| {
+        RepoctlError::Environment(format!(
+            "failed to read directory `{}`: {source}",
+            root.display()
+        ))
+    })? {
+        let entry = entry.map_err(|source| {
+            RepoctlError::Environment(format!(
+                "failed to read directory entry under `{}`: {source}",
+                root.display()
+            ))
+        })?;
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if file_name == "node_modules" || file_name == ".git" || file_name == "dist" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_source_files(&path, files)?;
+        } else if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|ext| matches!(ext, "ts" | "tsx" | "js" | "jsx" | "json"))
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn write_json_artifact<T: Serialize>(path: &Path, value: &T) -> Result<(), RepoctlError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| {
+            RepoctlError::Environment(format!(
+                "failed to create artifact directory `{}`: {source}",
+                parent.display()
+            ))
+        })?;
+    }
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|source| RepoctlError::Internal(format!("failed to serialize JSON: {source}")))?;
+    fs::write(path, content).map_err(|source| {
+        RepoctlError::Environment(format!(
+            "failed to write artifact `{}`: {source}",
+            path.display()
+        ))
+    })
+}
+
+fn read_json_artifact<T: DeserializeOwned>(path: &Path) -> Result<T, RepoctlError> {
+    let content = fs::read_to_string(path).map_err(|source| {
+        RepoctlError::Environment(format!(
+            "failed to read artifact `{}`: {source}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&content).map_err(|source| {
+        RepoctlError::Environment(format!(
+            "failed to parse artifact `{}`: {source}",
+            path.display()
+        ))
+    })
+}
+
+fn new_artifact_id(prefix: &str) -> Result<String, RepoctlError> {
+    Ok(format!("{prefix}-{}", unix_timestamp()?))
+}
+
+fn unix_timestamp() -> Result<u64, RepoctlError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|source| {
+            RepoctlError::Internal(format!("system clock before Unix epoch: {source}"))
+        })
+}
+
+fn sanitize_session_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn load_session_journal(
+    session_dir: &Path,
+    session: &str,
+) -> Result<(PathBuf, SessionJournal), RepoctlError> {
+    let direct_path = session_dir.join(format!("{session}.json"));
+    if direct_path.is_file() {
+        let journal = read_json_artifact(&direct_path)?;
+        return Ok((direct_path, journal));
+    }
+    for entry in fs::read_dir(session_dir).map_err(|source| {
+        RepoctlError::Environment(format!(
+            "failed to read session directory `{}`: {source}",
+            session_dir.display()
+        ))
+    })? {
+        let entry = entry.map_err(|source| {
+            RepoctlError::Environment(format!(
+                "failed to read session directory entry `{}`: {source}",
+                session_dir.display()
+            ))
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let journal = read_json_artifact::<SessionJournal>(&path)?;
+        if journal.name == session || journal.id == session {
+            return Ok((path, journal));
+        }
+    }
+    Err(RepoctlError::diagnostic(Diagnostic::error(
+        "ops.journal.session_not_found",
+        format!("session `{session}` was not found"),
+    )))
+}
+
+fn redact_secret_like_values(value: &str) -> String {
+    let mut redacted = Vec::new();
+    let mut skip_parts = 0_u8;
+    for part in value.split_whitespace() {
+        if skip_parts > 0 {
+            redacted.push("[REDACTED]".to_string());
+            skip_parts = skip_parts.saturating_sub(1);
+            continue;
+        }
+        let lower = part.to_ascii_lowercase();
+        if lower.contains("authorization") || lower.contains("cookie") {
+            redacted.push("[REDACTED]".to_string());
+            skip_parts = 2;
+        } else if lower.contains("token")
+            || lower.contains("secret")
+            || lower.contains("api_key")
+            || lower.contains("apikey")
+        {
+            redacted.push("[REDACTED]".to_string());
+            if !part.contains('=') && !part.contains(':') {
+                skip_parts = 1;
+            }
+        } else {
+            redacted.push(part.to_string());
+        }
+    }
+    redacted.join(" ")
+}
+
+fn render_session_summary(journal: &SessionJournal) -> String {
+    let mut markdown = String::new();
+    let _ = writeln!(markdown, "# Operations Session: {}", journal.name);
+    if let Some(plan_id) = &journal.plan_id {
+        let _ = writeln!(markdown, "\nPlan: `{plan_id}`");
+    }
+    markdown.push_str("\n## Evidence\n");
+    for entry in &journal.entries {
+        let detail = entry
+            .command
+            .as_ref()
+            .or(entry.message.as_ref())
+            .map_or("", String::as_str);
+        let status = entry
+            .exit_status
+            .map(|status| format!(" status={status}"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            markdown,
+            "- `{}` at {}{}: {}",
+            entry.kind, entry.timestamp, status, detail
+        );
+    }
+    markdown
+}
+
 fn required_selector(request: &ProtoFacadeRequest) -> Result<&str, RepoctlError> {
     request.selector.as_deref().ok_or_else(|| {
         RepoctlError::diagnostic(Diagnostic::error(
@@ -806,6 +1847,14 @@ fn proto_projects(
     projects.sort();
     projects.dedup();
     Ok(projects)
+}
+
+#[derive(Debug)]
+struct PrOperationalContext {
+    dns: Vec<DnsOperation>,
+    cdn: Vec<CdnCheck>,
+    provider_capabilities: Vec<ProviderCapabilityReport>,
+    production_gaps: Vec<String>,
 }
 
 fn normalize_proto_selector(selector: &str) -> Result<String, RepoctlError> {
@@ -889,6 +1938,7 @@ fn render_pr_summary(
     changed_files: &[RepoRelativePath],
     affected: &AffectedReport,
     diagnostics: &[Diagnostic],
+    operations: &PrOperationalContext,
 ) -> PrSummary {
     let mut markdown = String::new();
     markdown.push_str("# PR Impact Summary\n\n");
@@ -912,6 +1962,39 @@ fn render_pr_summary(
     for risk in &affected.risk_flags {
         let _ = writeln!(markdown, "- `{risk}`");
     }
+    markdown.push_str("\n## Deploy Surface\n");
+    if operations.dns.is_empty()
+        && operations.cdn.is_empty()
+        && operations.provider_capabilities.is_empty()
+    {
+        markdown.push_str("- No declared DNS, CDN, or provider-capability surface found.\n");
+    }
+    for operation in &operations.dns {
+        let proxied = operation
+            .expected_proxied
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        let _ = writeln!(
+            markdown,
+            "- DNS `{}` via `{}` target `{}` proxied `{}`",
+            operation.record, operation.provider, operation.expected_target, proxied
+        );
+    }
+    for check in &operations.cdn {
+        let _ = writeln!(
+            markdown,
+            "- CDN `{}` serves `{}` with headers `{}`",
+            check.provider,
+            check.alias,
+            check.expected_response_headers.join(", ")
+        );
+    }
+    for report in &operations.provider_capabilities {
+        let _ = writeln!(
+            markdown,
+            "- Provider `{}` `{}` in `{}`: `{}` `{}`",
+            report.package, report.version, report.workspace, report.status, report.field
+        );
+    }
     for diagnostic in diagnostics {
         let _ = writeln!(markdown, "- `{}`: {}", diagnostic.code, diagnostic.message);
     }
@@ -921,12 +2004,29 @@ fn render_pr_summary(
     }
     markdown.push_str("\n## Suggested Commands\n");
     markdown.push_str("- `repoctl graph validate`\n");
-    markdown.push_str("- `repoctl affected`\n");
+    markdown.push_str("- `repoctl affected --tasks check,test,build`\n");
+    markdown.push_str("- `repoctl run check --affected --dry-run`\n");
+    markdown
+        .push_str("- `repoctl ops plan --env staging --tasks check,test,build --format json`\n");
+    markdown.push_str("- `repoctl ops verify --plan target/repoctl/ops-plan.json`\n");
+    markdown.push_str("- `repoctl provider capabilities`\n");
+    if !operations.production_gaps.is_empty() {
+        markdown.push_str("\n## Unresolved Gaps\n");
+        for gap in &operations.production_gaps {
+            let _ = writeln!(markdown, "- {gap}");
+        }
+    }
     let impact = json!({
         "repo": snapshot.repo_manifest.name,
         "changedFiles": changed_files,
         "affected": affected,
         "diagnostics": diagnostics,
+        "deploySurface": {
+            "dns": &operations.dns,
+            "cdn": &operations.cdn,
+            "providerCapabilities": &operations.provider_capabilities,
+        },
+        "productionGaps": &operations.production_gaps,
     });
     PrSummary { markdown, impact }
 }
@@ -1254,7 +2354,7 @@ fn affected_tasks(
     requested_tasks: &[TaskName],
 ) -> Vec<String> {
     let workspace_set = workspaces.iter().cloned().collect::<BTreeSet<_>>();
-    let mut tasks = Vec::new();
+    let mut tasks = BTreeSet::new();
     for project in &snapshot.projects {
         if !projects.contains(&project.name) {
             continue;
@@ -1268,11 +2368,11 @@ fn affected_tasks(
                 if !workspace_set.is_empty() && !workspace_set.contains(&workspace_id) {
                     continue;
                 }
-                tasks.push(format!("{}:{}:{}", project.name, command.workspace, task));
+                tasks.insert(format!("{}:{}:{}", project.name, command.workspace, task));
             }
         }
     }
-    tasks
+    tasks.into_iter().collect()
 }
 
 fn plan_task_commands(
@@ -1579,6 +2679,16 @@ mod tests {
         assert_eq!(report.github_actions["include"], json!([]));
     }
 
+    #[test]
+    fn test_should_redact_secret_marker_values() {
+        let redacted = redact_secret_like_values(
+            "curl -H Authorization: Bearer abc123 --token def456 --cookie session=ghi",
+        );
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("def456"));
+        assert!(!redacted.contains("session=ghi"));
+    }
+
     fn fixture_snapshot() -> RepoSnapshot {
         let root = RepoRoot {
             absolute: camino::Utf8PathBuf::from("/tmp/repoctl-test"),
@@ -1626,6 +2736,9 @@ mod tests {
             tasks,
             iac: None,
             deploy: None,
+            dns: repoctl_core::ProjectDnsSpec::default(),
+            cdn: None,
+            ops: repoctl_core::ProjectOpsSpec::default(),
             protos: repoctl_core::ProjectProtoSpec::default(),
             ai: repoctl_core::ProjectAiSpec::default(),
             areas: repoctl_core::ProjectAreas::default(),
