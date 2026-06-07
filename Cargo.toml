@@ -30,8 +30,8 @@ tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros"] }
 toml_edit = "0.25.11"
 
 # workspace crates
-repoctl-core = { path = "crates/core" }
-repoctl-engine = { path = "crates/repoctl-engine" }
-repoctl-runner = { path = "crates/repoctl-runner" }
-repoctl-scaffold = { path = "crates/repoctl-scaffold" }
-repoctl = { path = "crates/repoctl" }
+repoctl-core = { path = "crates/core", version = "0.4.0" }
+repoctl-engine = { path = "crates/repoctl-engine", version = "0.4.0" }
+repoctl-runner = { path = "crates/repoctl-runner", version = "0.4.0" }
+repoctl-scaffold = { path = "crates/repoctl-scaffold", version = "0.4.0" }
+repoctl = { path = "crates/repoctl", version = "0.4.0" }

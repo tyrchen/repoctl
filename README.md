@@ -1,6 +1,6 @@
 # repoctl
 
-`repoctl` is a graph-aware control plane for functional monorepos. It gives a repository one validated model for humans, CI, and AI agents to share: project boundaries, workspace discovery, dependency graph, affected tasks, CI matrices, PR impact, templates, proto ownership, IaC routing, and agent context.
+`repoctl` is a graph-aware control plane for functional monorepos. It gives a repository one validated model for humans, CI, and AI agents to share: project boundaries, workspace discovery, dependency graph, affected tasks, CI matrices, PR impact, templates, proto ownership, IaC routing, operations planning, and agent context.
 
 The project is still early, but the core workflow is already present behind a typed Rust facade and a CLI named `repoctl`.
 
@@ -12,7 +12,8 @@ Large monorepos become hard to operate when every tool sees a different shape. P
 
 - `repo.yaml` defines repo layout, defaults, proto roots, IaC roots, AI context paths, and global policies.
 - `project.yaml` defines one functional project: app, framework, foundation service, proto root, or core infrastructure.
-- The generated graph powers validation, affected analysis, task planning, CI data, PR summaries, and scoped AI context.
+- Project manifests can also declare task commands, IaC stacks, DNS/CDN intent, runtime probes, and manual-state reconciliation records.
+- The generated graph powers validation, affected analysis, task planning, CI data, PR summaries, operations plans, and scoped AI context.
 
 ## Repository layout
 
@@ -101,6 +102,20 @@ repoctl ci matrix \
   --format github-actions
 ```
 
+Plan an operational infrastructure change:
+
+```bash
+repoctl ops plan \
+  --base origin/main \
+  --head HEAD \
+  --env staging \
+  --tasks check,test,build \
+  --output target/repoctl/ops-plan.json
+
+repoctl ops verify --plan target/repoctl/ops-plan.json
+repoctl provider capabilities --workspace frameworks.operon:infra
+```
+
 ## Main command groups
 
 | Command | Purpose |
@@ -118,7 +133,9 @@ repoctl ci matrix \
 | `repoctl proto` | Query proto owners and consumers, and check proto policy. |
 | `repoctl context` | Build project-scoped AI context. |
 | `repoctl pr` | Build PR impact summaries. |
-| `repoctl iac` | Plan IaC provider commands without applying changes. |
+| `repoctl iac` | Plan IaC provider commands without applying changes. `iac preview` is an alias for preview planning. |
+| `repoctl ops` | Build non-mutating operations plans, verification command lists, journals, and reconciliation reports. |
+| `repoctl provider` | Inspect provider package capabilities, especially Pulumi provider/schema gaps. |
 | `repoctl skills` | Check or synchronize generated agent skills. |
 
 Most commands accept `--repo` and `--format human|json|github-actions`. Human output is for local use. JSON output is for automation. GitHub Actions output is specialized where CI needs a matrix-shaped payload.

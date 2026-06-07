@@ -1,6 +1,6 @@
 # repoctl 使用指南
 
-这份指南面向在业务仓库里使用 `repoctl` 的开发者。你不需要理解内部 Rust 实现，只要知道它如何帮你创建项目、检查边界、判断 PR 影响面、生成 CI matrix，以及给 AI agent 准备合适的上下文。
+这份指南面向在业务仓库里使用 `repoctl` 的开发者。你不需要理解内部 Rust 实现，只要知道它如何帮你创建项目、检查边界、判断 PR 影响面、生成 CI matrix、规划运维变更，以及给 AI agent 准备合适的上下文。
 
 ## 先理解项目类型
 
@@ -196,11 +196,50 @@ repoctl proto check --base origin/main --head HEAD
 
 ```bash
 repoctl iac plan --affected --env staging
+repoctl iac preview --affected --env staging
 repoctl iac plan --project apps.catalog --env prod
 repoctl iac plan --core --env prod
 ```
 
-`repoctl iac plan` 只做计划和风险提示，不执行 apply。
+`repoctl iac plan` 只做计划和风险提示，不执行 apply。`repoctl iac preview` 是同一条预览规划路径的别名。
+
+## 规划运维变更
+
+如果一个改动同时影响 IaC、DNS、CDN、共享 framework、应用栈和上线验证，用 `repoctl ops plan` 先生成计划：
+
+```bash
+repoctl ops plan \
+  --base origin/main \
+  --head HEAD \
+  --env staging \
+  --tasks check,test,build \
+  --output target/repoctl/ops-plan.json
+```
+
+ops plan 会列出 affected 项目、去重后的任务 dry-run、IaC preview 顺序、DNS/CDN 检查、provider 能力诊断、HTTP 探针、运行时依赖探针、手工状态清理项，以及需要的环境变量名字。它不会默认执行 apply。
+
+根据保存的计划生成非破坏性验证命令：
+
+```bash
+repoctl ops verify --plan target/repoctl/ops-plan.json
+```
+
+长时间排障或上线时，可以把证据写进本地 journal：
+
+```bash
+repoctl ops journal start --name staging-dns-cutover
+repoctl ops journal add-command --session staging-dns-cutover -- repoctl graph validate
+repoctl ops journal add-note --session staging-dns-cutover --kind finding --message "Cloudflare records are DNS-only"
+repoctl ops journal summary --session staging-dns-cutover
+```
+
+journal 放在 `target/repoctl/sessions/`，看起来像 token、cookie、Authorization header、API key 或 secret 的内容会被脱敏。
+
+检查 provider 能力，避免为了一个字段盲目升级大版本：
+
+```bash
+repoctl provider capabilities --workspace frameworks.operon:infra
+```
 
 ## 给 AI agent 准备上下文
 
@@ -216,7 +255,7 @@ repoctl context apps.catalog --for ai --format json
 repoctl pr summary --base origin/main --head HEAD
 ```
 
-摘要会把影响项目、风险、reviewer 和建议检查项集中起来，适合贴到 PR 描述或 CI 注释里。
+摘要会把影响项目、风险、reviewer、建议检查项和运维影响面集中起来，适合贴到 PR 描述或 CI 注释里。
 
 ## 输出格式怎么选
 
@@ -246,6 +285,7 @@ repoctl ci matrix --tasks check,test --format github-actions
 2. 跑 `repoctl graph validate`。
 3. 跑 `repoctl affected --base origin/main --head HEAD --tasks check,test`。
 4. 用 `repoctl run <task> --affected` 跑必要任务。
-5. 用 `repoctl pr summary` 整理影响面。
+5. 如果涉及 IaC、DNS、CDN 或上线验证，再跑 `repoctl ops plan --base origin/main --head HEAD --env staging --tasks check,test,build`。
+6. 用 `repoctl pr summary` 整理影响面。
 
 如果前面的图校验失败，先修图和清单。后面的 affected、CI、PR 摘要都依赖一张正确的项目图。

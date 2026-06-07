@@ -1,8 +1,6 @@
 [package]
 name = "repoctl-core"
-description = """
-
-"""
+description = "Core domain types, diagnostics, manifest parsing, and ports for repoctl."
 categories = ["development-tools"]
 keywords = []
 version.workspace = true

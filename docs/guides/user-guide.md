@@ -283,11 +283,66 @@ Plan infrastructure commands without applying:
 
 ```bash
 repoctl iac plan --affected --env staging
+repoctl iac preview --affected --env staging
 repoctl iac plan --project apps.catalog --env prod
 repoctl iac plan --core --env prod
 ```
 
-`repoctl iac plan` reports commands and risk flags. It does not run provider apply operations.
+`repoctl iac plan` reports commands and risk flags. `repoctl iac preview` is an alias for the same preview-planning path. Neither command runs provider apply operations.
+
+## Plan operational changes
+
+For changes that cross infrastructure, DNS, CDN, shared framework packages, and application stacks, use the operations layer. It is plan-first: mutating commands are listed for review, not executed by default.
+
+```bash
+repoctl ops plan \
+  --base origin/main \
+  --head HEAD \
+  --env staging \
+  --tasks check,test,build \
+  --output target/repoctl/ops-plan.json
+```
+
+An operations plan includes:
+
+- affected projects, workspaces, and deduplicated task dry-runs;
+- ordered IaC preview commands and gated apply commands;
+- declared DNS/CDN checks, such as Cloudflare DNS-only records in front of CloudFront;
+- Pulumi provider capability diagnostics;
+- manifest-declared HTTP probes and runtime dependency probes;
+- manual-state reconciliation records and cleanup commands;
+- required environment variable names, without secret values.
+
+Render non-mutating verification commands from a saved plan:
+
+```bash
+repoctl ops verify --plan target/repoctl/ops-plan.json
+```
+
+Record long-running session evidence locally:
+
+```bash
+repoctl ops journal start --name staging-dns-cutover
+repoctl ops journal add-command --session staging-dns-cutover -- repoctl graph validate
+repoctl ops journal add-note --session staging-dns-cutover --kind finding --message "Cloudflare records are DNS-only"
+repoctl ops journal summary --session staging-dns-cutover
+```
+
+Session journals are stored under `target/repoctl/sessions/`. Values that look like tokens, cookies, authorization headers, API keys, or secrets are redacted.
+
+Review temporary cloud state that must be reconciled back into IaC:
+
+```bash
+repoctl ops reconcile --plan target/repoctl/ops-plan.json
+```
+
+Inspect provider capability gaps before accepting a broad provider upgrade:
+
+```bash
+repoctl provider capabilities --workspace frameworks.operon:infra
+```
+
+For Pulumi TypeScript workspaces, provider capability checks inspect local package metadata and source usage. For example, they can flag use of Lambda Function URL permission fields that require a newer `@pulumi/aws` provider and recommend ordered previews instead of a blind major upgrade.
 
 ## AI context and PR summaries
 
@@ -303,7 +358,7 @@ Build a PR summary:
 repoctl pr summary --base origin/main --head HEAD
 ```
 
-The PR summary is designed to surface affected projects, risk, reviewers, and recommended checks.
+The PR summary is designed to surface affected projects, risk, reviewers, recommended checks, and operational deploy surface when the diff declares DNS, CDN, provider, probe, or manual-state intent.
 
 ## Output formats
 
@@ -333,6 +388,7 @@ For a normal PR:
 2. Run `repoctl graph validate`.
 3. Run `repoctl affected --base origin/main --head HEAD --tasks check,test`.
 4. Run the smallest meaningful task set, often through `repoctl run <task> --affected`.
-5. Use `repoctl pr summary` to capture impact and review hints.
+5. For operational or IaC-heavy diffs, generate `repoctl ops plan --base origin/main --head HEAD --env staging --tasks check,test,build`.
+6. Use `repoctl pr summary` to capture impact and review hints.
 
 When a command returns diagnostics, fix the manifest or boundary issue first. Downstream commands rely on the graph being valid.

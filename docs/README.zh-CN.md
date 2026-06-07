@@ -1,6 +1,6 @@
 # repoctl
 
-`repoctl` 是给功能型 monorepo 用的工程控制面。它关心的不是某一种语言的 workspace，而是整个代码库的工程边界：哪些目录是 app，哪些能力应该放在 framework，哪些服务属于 foundation，proto 归谁维护，IaC 应该在哪儿跑，CI 该测哪些东西，AI agent 能安全改到什么范围。
+`repoctl` 是给功能型 monorepo 用的工程控制面。它关心的不是某一种语言的 workspace，而是整个代码库的工程边界：哪些目录是 app，哪些能力应该放在 framework，哪些服务属于 foundation，proto 归谁维护，IaC 和运维变更应该怎么计划，CI 该测哪些东西，AI agent 能安全改到什么范围。
 
 一句话说，它把仓库整理成一张可验证的项目图。人、CI 和自动化工具都围着这张图工作，少靠约定，多靠检查。
 
@@ -11,9 +11,9 @@
 `repoctl` 用两个核心清单把这些信息收回来：
 
 - `repo.yaml`：仓库级规则，包含默认 owner、proto 根目录、IaC 根目录、AI context 输出位置和全局策略。
-- `project.yaml`：项目级规则，描述 app、framework、foundation service、proto root 或 core infra 的 owner、workspace、任务、依赖、proto、IaC 和可编辑区域。
+- `project.yaml`：项目级规则，描述 app、framework、foundation service、proto root 或 core infra 的 owner、workspace、任务、依赖、proto、IaC、DNS/CDN 意图、探针和可编辑区域。
 
-有了这些清单，`repoctl` 可以做图校验、边界检查、affected 分析、CI matrix、PR 摘要、模板渲染、proto owner 查询和 AI context 生成。
+有了这些清单，`repoctl` 可以做图校验、边界检查、affected 分析、CI matrix、PR 摘要、运维计划、模板渲染、proto owner 查询和 AI context 生成。
 
 ## 推荐目录
 
@@ -82,6 +82,7 @@ repoctl new foundation identity \
 repoctl graph validate
 repoctl affected --changed-file apps/catalog/api/src/lib.rs --tasks check,test
 repoctl ci matrix --tasks check,test,build --format github-actions
+repoctl ops plan --base origin/main --head HEAD --env staging --tasks check,test,build
 ```
 
 更多日常用法见 [中文使用指南](guides/user-guide.zh-CN.md)。参与开发这个工具本身，见 [中文开发指南](guides/developer-guide.zh-CN.md)。

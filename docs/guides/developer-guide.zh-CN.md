@@ -10,7 +10,7 @@ crates/repoctl/            对外 facade API
 crates/core/               领域类型、诊断、manifest parser、端口 trait
 crates/repoctl-engine/     仓库发现、图构建、策略检查
 crates/repoctl-scaffold/   init、新项目、模板、skill 同步
-crates/repoctl-runner/     affected、任务、CI、proto、IaC、PR 摘要
+crates/repoctl-runner/     affected、任务、CI、proto、IaC、ops、PR 摘要
 specs/                     产品、设计、实现、验证规格
 docs/                      用户文档和开发文档
 ```
@@ -85,7 +85,7 @@ cargo run --bin repoctl -- graph validate --repo <fixture>
 
 - `repoctl-engine`：发现仓库、构建 graph snapshot、执行策略检查。
 - `repoctl-scaffold`：规划文件操作，覆盖 init、新项目、模板、skill。
-- `repoctl-runner`：计算 affected、规划或执行任务、生成 CI 数据、检查 codegen、解析 proto owner、生成 PR 摘要、规划 IaC。
+- `repoctl-runner`：计算 affected、规划或执行任务、生成 CI 数据、检查 codegen、解析 proto owner、生成 PR 摘要、规划 IaC、生成 ops plan、管理 session journal、检查 provider 能力。
 - `repoctl-core`：放验证过的领域类型、manifest 解析、诊断模型、DTO 和端口 trait。
 
 新增能力时，先判断这个概念属于哪一层。为了少写几行代码就把逻辑放进 CLI，后面会很难维护。
@@ -106,6 +106,8 @@ cargo run --bin repoctl -- graph validate --repo <fixture>
 - `repoctl.template/v1`
 
 YAML 字段默认严格处理。除非是明确的兼容需求，否则不要悄悄接受未知字段。
+
+`company.project/v1` 里的 ops 相关字段也要在边界处验证。DNS/CDN 意图、HTTP 探针、运行时依赖和手工状态记录都不能保存 secret 值；计划和 journal 里只能出现环境变量名、资源 ID、命令和脱敏后的证据。
 
 ## CLI 约定
 
@@ -151,6 +153,19 @@ mod tests {
 ## 发布相关
 
 `CHANGELOG.md` 由 `git cliff` 生成，正常不要手改生成区块。
+
+发布前要确认 workspace 内部依赖既有本地 `path`，也有 crates.io `version`。Cargo 发布时会移除 `path`，只留下版本约束；只有 path 没有 version 的依赖不能发布。
+
+发布 dry-run 按依赖顺序跑：
+
+```bash
+cargo publish -p repoctl-core --dry-run --allow-dirty
+cargo publish -p repoctl-engine --dry-run --allow-dirty
+cargo publish -p repoctl-scaffold --dry-run --allow-dirty
+cargo publish -p repoctl-runner --dry-run --allow-dirty
+cargo publish -p repoctl --dry-run --allow-dirty
+cargo publish -p repoctl-cli --dry-run --allow-dirty
+```
 
 发布命令在 Makefile 里：
 
