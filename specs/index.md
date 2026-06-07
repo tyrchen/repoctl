@@ -21,3 +21,7 @@
 - [Code Size Inspection Design](repoctl-v0.5-code-size-inspection-design.md)
 - [Code Size Inspection Implementation Plan](repoctl-v0.5-code-size-inspection-impl-plan.md)
 - [Code Size Inspection Verification Plan](repoctl-v0.5-code-size-inspection-verification-plan.md)
+
+## repoctl v0.6
+
+- [Agent Verification Budget Spec](repoctl-v0.6-agent-verification-budget-spec.md)

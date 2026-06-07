@@ -21,14 +21,14 @@ use repoctl::{
     AdoptionVerifyRequest, AffectedReport, AffectedRequest, AiContext, AiContextRequest,
     BoundaryLintRequest, CiFallback, CiMatrixReport, CiMatrixRequest, CiProvider, CiWorkflowReport,
     CiWorkflowRequest, CodeLanguage, CodeSizeFinding, CodeSizeInspectionReport,
-    CodeSizeInspectionRequest, CodeSizeRuleKind, CodeSizeScope, CodegenCheckReport,
-    CodegenCheckRequest, DependencyRewriteMode, Diagnostic, ExplainReport, ExplainRequest,
-    FileOperation, GraphPrintReport, GraphPrintRequest, GraphValidateRequest, HygieneCheckRequest,
-    HygieneCleanRequest, HygieneReport, IacFacadeReport, IacFacadeRequest, IacProvider, InitPlan,
-    InitProfile, InitRequest, InspectionFailOn, NewProjectRequest, OpsJournalAction,
-    OpsJournalReport, OpsJournalRequest, OpsPlan, OpsPlanRequest, OpsReconcileReport,
-    OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest, OwnerHandle, PrSummary,
-    PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName, ProtoFacadeReport,
+    CodeSizeInspectionRequest, CodeSizeInspectionSummary, CodeSizeRuleKind, CodeSizeScope,
+    CodegenCheckReport, CodegenCheckRequest, DependencyRewriteMode, Diagnostic, ExplainReport,
+    ExplainRequest, FileOperation, GraphPrintReport, GraphPrintRequest, GraphValidateRequest,
+    HygieneCheckRequest, HygieneCleanRequest, HygieneReport, IacFacadeReport, IacFacadeRequest,
+    IacProvider, InitPlan, InitProfile, InitRequest, InspectionFailOn, NewProjectRequest,
+    OpsJournalAction, OpsJournalReport, OpsJournalRequest, OpsPlan, OpsPlanRequest,
+    OpsReconcileReport, OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest, OwnerHandle,
+    PrSummary, PrSummaryRequest, ProcessCommand, ProjectKind, ProjectName, ProtoFacadeReport,
     ProtoFacadeRequest, ProtoOperation, ProtoPackageName, ProviderCapabilityReport,
     ProviderCapabilityRequest, RenderPlan, RepoLayout, RepoName, RepoRelativePath, Repoctl,
     RepoctlError, Severity, SkillsFacadeRequest, TaskName, TaskRunReport, TaskRunRequest,
@@ -2271,46 +2271,52 @@ fn render_code_size_report(
 ) -> Result<(), RepoctlError> {
     match format {
         OutputFormat::Json | OutputFormat::GithubActions => write_json(report),
-        OutputFormat::Human => {
-            let mut output = String::new();
-            append_title(&mut output, "Code size inspection");
-            let _ = writeln!(
-                output,
-                "{} findings across {} files",
-                report.summary.finding_count, report.summary.files_with_findings
-            );
-            let _ = writeln!(
-                output,
-                "Scanned: {}  Skipped: {}  Errors: {}  Duration: {}ms",
-                report.summary.files_scanned,
-                report.summary.files_skipped,
-                report.summary.files_errored,
-                report.summary.duration_millis
-            );
-            if !report.findings.is_empty() {
-                append_table(
-                    &mut output,
-                    "Findings",
-                    &["Severity", "Rule", "Path", "Lines", "Message"],
-                    report.findings.iter().map(finding_row).collect(),
-                );
-            }
-            if !report.skipped.is_empty() {
-                append_table(
-                    &mut output,
-                    "Skipped files",
-                    &["Reason", "Count"],
-                    report
-                        .skipped
-                        .iter()
-                        .map(|item| vec![item.reason.clone(), item.count.to_string()])
-                        .collect(),
-                );
-            }
-            append_diagnostics(&mut output, &report.diagnostics);
-            write_stdout(&output)
-        }
+        OutputFormat::Human => write_stdout(&format_code_size_report_human(report)),
     }
+}
+
+fn format_code_size_report_human(report: &CodeSizeInspectionReport) -> String {
+    let mut output = String::new();
+    append_title(&mut output, "Code size inspection");
+    append_code_size_summary(&mut output, &report.summary);
+    if !report.findings.is_empty() {
+        append_table(
+            &mut output,
+            "Findings",
+            &["Severity", "Rule", "Path", "Lines", "Message"],
+            report.findings.iter().map(finding_row).collect(),
+        );
+    }
+    if !report.skipped.is_empty() {
+        append_table(
+            &mut output,
+            "Skipped files",
+            &["Reason", "Count"],
+            report
+                .skipped
+                .iter()
+                .map(|item| vec![item.reason.clone(), item.count.to_string()])
+                .collect(),
+        );
+    }
+    append_diagnostics(&mut output, &report.diagnostics);
+    output
+}
+
+fn append_code_size_summary(output: &mut String, summary: &CodeSizeInspectionSummary) {
+    let _ = writeln!(
+        output,
+        "Files: considered {}  scanned {}  skipped {}  errors {}",
+        summary.files_considered,
+        summary.files_scanned,
+        summary.files_skipped,
+        summary.files_errored
+    );
+    let _ = writeln!(
+        output,
+        "Findings: {} across {} files  Duration: {}ms",
+        summary.finding_count, summary.files_with_findings, summary.duration_millis
+    );
 }
 
 fn finding_row(finding: &CodeSizeFinding) -> Vec<String> {
@@ -3047,6 +3053,27 @@ mod tests {
         assert!(output.contains("code: template.source.invalid"));
         assert!(output.contains("path: templates/app/template.yaml"));
         assert!(output.contains("help: use builtin:<name> or local:<path>"));
+    }
+
+    #[test]
+    fn test_should_render_code_size_file_counts_separately_from_findings() {
+        let report = CodeSizeInspectionReport {
+            summary: CodeSizeInspectionSummary {
+                files_considered: 751,
+                files_scanned: 751,
+                files_skipped: 0,
+                files_errored: 0,
+                finding_count: 24,
+                files_with_findings: 17,
+                duration_millis: 1048,
+            },
+            ..CodeSizeInspectionReport::default()
+        };
+
+        let output = format_code_size_report_human(&report);
+
+        assert!(output.contains("Files: considered 751  scanned 751  skipped 0  errors 0"));
+        assert!(output.contains("Findings: 24 across 17 files  Duration: 1048ms"));
     }
 
     #[test]
