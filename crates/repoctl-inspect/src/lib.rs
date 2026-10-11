@@ -1342,7 +1342,7 @@ mod tests {
         let spans = spans_for(
             source,
             CodeLanguage::Rust,
-            &RepoRelativePath::new("src/main.rs").ok(),
+            RepoRelativePath::new("src/main.rs").ok().as_ref(),
         );
         assert!(spans.iter().any(|span| {
             span.kind == SyntaxSpanKind::Function && span.symbol.as_deref() == Some("main")
@@ -1356,7 +1356,7 @@ mod tests {
     fn test_should_parse_tsx_with_tsx_grammar() {
         let path = RepoRelativePath::new("apps/web/src/component.tsx").ok();
         let source = b"export function Card() {\nreturn <div />;\n}\n";
-        let spans = spans_for(source, CodeLanguage::TypeScript, &path);
+        let spans = spans_for(source, CodeLanguage::TypeScript, path.as_ref());
         assert!(spans.iter().any(|span| {
             span.kind == SyntaxSpanKind::Function && span.symbol.as_deref() == Some("Card")
         }));
@@ -1366,7 +1366,7 @@ mod tests {
     fn test_should_collect_typescript_expect_test_range() {
         let path = RepoRelativePath::new("apps/web/src/component.test.ts").ok();
         let source = b"expect(() => {\n  throw new Error('x');\n}).toThrow();\n";
-        let spans = spans_for(source, CodeLanguage::TypeScript, &path);
+        let spans = spans_for(source, CodeLanguage::TypeScript, path.as_ref());
         assert!(spans.iter().any(|span| span.kind == SyntaxSpanKind::Test));
     }
 
@@ -1374,7 +1374,7 @@ mod tests {
     fn test_should_include_python_decorators_in_function_span() {
         let path = RepoRelativePath::new("service/app.py").ok();
         let source = b"@route('/x')\n@auth\nasync def handler():\n    return True\n";
-        let spans = spans_for(source, CodeLanguage::Python, &path);
+        let spans = spans_for(source, CodeLanguage::Python, path.as_ref());
         let handler = spans
             .iter()
             .find(|span| {
@@ -1389,7 +1389,7 @@ mod tests {
     fn test_should_collect_python_test_ranges() {
         let source = b"def test_should_work():\n    assert True\n";
         let path = RepoRelativePath::new("tests/test_app.py").ok();
-        let spans = spans_for(source, CodeLanguage::Python, &path);
+        let spans = spans_for(source, CodeLanguage::Python, path.as_ref());
         assert!(spans.iter().any(|span| span.kind == SyntaxSpanKind::Test));
         assert!(
             path.as_ref()
@@ -1444,8 +1444,8 @@ inspection:
 
         let report = inspect_temp_repo(temp.path(), CodeSizeScope::All, Vec::new());
 
-        assert!(report.diagnostics.is_empty());
-        assert!(report.findings.is_empty());
+        assert_eq!(report.diagnostics.len(), 0);
+        assert_eq!(report.findings.len(), 0);
         assert_eq!(report.summary.files_scanned, 1);
     }
 
@@ -1470,7 +1470,7 @@ ai:
 
         let report = inspect_temp_repo(temp.path(), CodeSizeScope::All, Vec::new());
 
-        assert!(report.findings.is_empty());
+        assert_eq!(report.findings.len(), 0);
         assert_eq!(report.summary.files_scanned, 0);
         assert!(
             report
@@ -1485,13 +1485,13 @@ ai:
         let temp = tempfile::tempdir().expect("tempdir");
         write_repo_manifest(
             temp.path(),
-            r#"
+            r"
 inspection:
   code_size:
     rules:
       file:
         max_lines: 1
-"#,
+",
         );
         write_project(temp.path(), "apps/catalog", "");
         write_file(
@@ -1525,13 +1525,13 @@ inspection:
         let temp = tempfile::tempdir().expect("tempdir");
         write_repo_manifest(
             temp.path(),
-            r#"
+            r"
 inspection:
   code_size:
     rules:
       function:
         max_lines: 2
-"#,
+",
         );
         write_project(temp.path(), "apps/catalog", "");
         write_file(
@@ -1556,10 +1556,10 @@ inspection:
     fn spans_for(
         source: &[u8],
         language: CodeLanguage,
-        path: &Option<RepoRelativePath>,
+        path: Option<&RepoRelativePath>,
     ) -> Vec<SyntaxSpan> {
         let fallback = RepoRelativePath::new("src/file.rs").ok();
-        let path = path.as_ref().or(fallback.as_ref());
+        let path = path.or(fallback.as_ref());
         let mut parser = Parser::new();
         if let Some(path) = path {
             let language_impl = tree_sitter_language(language, path);

@@ -33,7 +33,7 @@ jobs:
     #       --health-timeout 5s
     #       --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
@@ -55,6 +55,12 @@ jobs:
         run: cargo check --all
       - name: Lint rust sources
         run: cargo clippy --all-targets --all-features --tests --benches -- -D warnings
+      - uses: bufbuild/buf-action@v1
+        with:
+          version: '1.73.0'
+          setup_only: true
+      - name: Execute real Buf compatibility contract
+        run: REPOCTL_TEST_BUF="$(command -v buf)" make test-buf
       - name: Execute rust tests
         run: cargo nextest run --all-features
       - name: Generate a changelog

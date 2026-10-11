@@ -4,11 +4,10 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use repoctl_core::{
     DependencySurface, DependencyTarget, EdgeKind, GraphBuildInput, GraphBuilder, GraphEdge,
-    GraphNode, GraphNodeKind, ProjectKind, RepoGraph, RepoctlError, WorkspaceInspectionInput,
-    WorkspaceInspector,
+    GraphNode, GraphNodeKind, ProjectKind, RepoGraph, RepoctlError, WorkspaceInspector,
 };
 
-use crate::RustWorkspaceInspector;
+use crate::{LocalRustWorkspaceInspector, NodeWorkspaceInspector, PythonWorkspaceInspector};
 
 /// Default graph builder combining manifest edges and workspace inspector edges.
 #[derive(Clone)]
@@ -27,7 +26,11 @@ impl std::fmt::Debug for DefaultGraphBuilder {
 impl Default for DefaultGraphBuilder {
     fn default() -> Self {
         Self {
-            inspectors: vec![Arc::new(RustWorkspaceInspector)],
+            inspectors: vec![
+                Arc::new(LocalRustWorkspaceInspector),
+                Arc::new(NodeWorkspaceInspector),
+                Arc::new(PythonWorkspaceInspector),
+            ],
         }
     }
 }
@@ -110,22 +113,9 @@ impl GraphBuilder for DefaultGraphBuilder {
                 }
             }
         }
-        for project in &input.projects {
-            for workspace in &project.workspaces {
-                for inspector in &self.inspectors {
-                    if inspector.language() != workspace.language {
-                        continue;
-                    }
-                    let inspection = WorkspaceInspectionInput {
-                        root: &input.root,
-                        projects: &input.projects,
-                        project,
-                        workspace,
-                    };
-                    for discovered in inspector.inspect(&inspection)? {
-                        graph.add_edge(repoctl_core::discovered_to_graph_edge(&discovered));
-                    }
-                }
+        for inspector in &self.inspectors {
+            for discovered in inspector.inspect_all(&input)? {
+                graph.add_edge(repoctl_core::discovered_to_graph_edge(&discovered));
             }
         }
         graph.nodes.sort_by(|left, right| left.id.cmp(&right.id));

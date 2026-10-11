@@ -19,6 +19,7 @@ use crate::{
         TemplateFile, TemplateInput, TemplateManifest, Toolchain, Visibility, WorkspaceLanguage,
         WorkspaceName, WorkspaceSpec,
     },
+    execution::{TaskCacheConfig, TaskExecutionOptions},
     ports::ManifestParser,
 };
 
@@ -627,6 +628,12 @@ struct RawWorkspaceSpec {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct RawTaskCommand {
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    max_output_bytes: Option<usize>,
+    #[serde(default)]
+    cache: RawTaskCacheConfig,
     workspace: String,
     command: String,
     #[serde(default)]
@@ -925,13 +932,78 @@ impl RawWorkspaceSpec {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+struct RawTaskCacheConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    inputs: Vec<String>,
+    #[serde(default)]
+    outputs: Vec<String>,
+    #[serde(default)]
+    env: Vec<String>,
+    #[serde(default)]
+    runtime: Vec<String>,
+}
+
+impl RawTaskCacheConfig {
+    fn into_domain(self) -> Result<TaskCacheConfig, Diagnostic> {
+        let config = TaskCacheConfig {
+            enabled: self.enabled,
+            inputs: bounded_vec(self.inputs, 256, "manifest.cache.inputs")?
+                .into_iter()
+                .map(RepoGlob::new)
+                .collect::<Result<_, _>>()?,
+            outputs: bounded_vec(self.outputs, 64, "manifest.cache.outputs")?
+                .into_iter()
+                .map(RepoRelativePath::new)
+                .collect::<Result<_, _>>()?,
+            env: bounded_vec(self.env, 64, "manifest.cache.env")?,
+            runtime: bounded_vec(self.runtime, 16, "manifest.cache.runtime")?
+                .into_iter()
+                .map(|command| CommandSpec::parse(&command))
+                .collect::<Result<_, _>>()?,
+        };
+        if config.env.iter().any(|name| {
+            name.is_empty()
+                || name.len() > 128
+                || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        }) {
+            return Err(Diagnostic::error(
+                "manifest.cache.env",
+                "cache environment names must be bounded ASCII identifiers",
+            ));
+        }
+        if config.enabled && config.inputs.is_empty() {
+            return Err(Diagnostic::error(
+                "manifest.cache.inputs",
+                "enabled task cache requires explicit input patterns",
+            ));
+        }
+        Ok(config)
+    }
+}
+
 impl RawTaskCommand {
     fn into_domain(self) -> Result<TaskCommand, Diagnostic> {
+        let mut execution = TaskExecutionOptions::default();
+        execution.timeout_seconds = self.timeout_seconds.unwrap_or(execution.timeout_seconds);
+        execution.max_output_bytes = self.max_output_bytes.unwrap_or(execution.max_output_bytes);
+        if !(1..=86_400).contains(&execution.timeout_seconds)
+            || !(1..=16_777_216).contains(&execution.max_output_bytes)
+        {
+            return Err(Diagnostic::error(
+                "manifest.task.limits",
+                "task deadline or output limit is outside the supported range",
+            ));
+        }
+        execution.cache = self.cache.into_domain()?;
         Ok(TaskCommand {
+            execution,
             workspace: WorkspaceName::new(self.workspace)?,
             command: CommandSpec::parse(&self.command)?,
-            depends_on: self
-                .depends_on
+            depends_on: bounded_vec(self.depends_on, 256, "manifest.task.depends_on")?
                 .into_iter()
                 .map(RawTaskDependency::into_domain)
                 .collect::<Result<Vec<_>, _>>()?,

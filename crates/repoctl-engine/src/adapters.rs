@@ -9,9 +9,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::MetadataCommand;
 use ignore::{DirEntry, WalkBuilder};
 use repoctl_core::{
-    DependencySurface, DiscoveredEdge, EdgeKind, RepoFileSystem, RepoLocator, RepoRelativePath,
-    RepoRoot, RepoctlError, WalkRequest, WorkspaceInspectionInput, WorkspaceInspector,
-    WorkspaceLanguage, utf8_path_buf,
+    DependencySurface, DiscoveredEdge, EdgeKind, ProjectKind, RepoFileSystem, RepoLocator,
+    RepoRelativePath, RepoRoot, RepoctlError, WalkRequest, WorkspaceInspectionInput,
+    WorkspaceInspector, WorkspaceLanguage, utf8_path_buf,
 };
 
 /// Local repo locator using `repo.yaml` first and `.git` as a fallback root marker.
@@ -185,53 +185,50 @@ impl WorkspaceInspector for RustWorkspaceInspector {
     }
 }
 
-fn classify_path_dependency(
+pub(super) fn classify_path_dependency(
     input: &WorkspaceInspectionInput<'_>,
     relative: &RepoRelativePath,
 ) -> Option<DiscoveredEdge> {
-    for target in input.projects {
-        if target.name == input.project.name || !relative.starts_with(&target.path) {
-            continue;
-        }
-        let kind = match target.kind {
-            repoctl_core::ProjectKind::Framework => {
-                if path_matches_areas(relative, target, &target.areas.public_facades) {
-                    EdgeKind::UsesFrameworkFacade
-                } else {
-                    EdgeKind::UsesFrameworkInternal
-                }
-            }
-            repoctl_core::ProjectKind::FoundationService => {
-                if path_matches_areas(relative, target, &target.areas.public_clients) {
-                    EdgeKind::UsesFoundationClient
-                } else {
-                    EdgeKind::UsesFoundationInternal
-                }
-            }
-            repoctl_core::ProjectKind::CoreInfra
-            | repoctl_core::ProjectKind::CoreInfraComponent => {
-                let surface = classify_core_infra_module(relative, target);
-                match surface {
-                    DependencySurface::CoreInfraPublicModule => EdgeKind::UsesCoreInfraModule,
-                    DependencySurface::CoreInfraInternalModule => {
-                        EdgeKind::UsesCoreInfraInternalModule
-                    }
-                    _ => EdgeKind::DependsOnProject,
-                }
-            }
-            repoctl_core::ProjectKind::App
-            | repoctl_core::ProjectKind::ProtoRoot
-            | repoctl_core::ProjectKind::Tool => EdgeKind::DependsOnProject,
-        };
-        return Some(DiscoveredEdge {
-            from_project: input.project.name.to_string(),
-            from_workspace: input.workspace.name.to_string(),
-            to_project: target.name.to_string(),
-            kind,
-            evidence: Some(relative.to_string()),
-        });
+    let target = input
+        .projects
+        .iter()
+        .filter(|target| relative.starts_with(&target.path))
+        .max_by_key(|target| target.path.as_str().len())?;
+    if target.name == input.project.name {
+        return None;
     }
-    None
+    let kind = match target.kind {
+        ProjectKind::Framework => {
+            if path_matches_areas(relative, target, &target.areas.public_facades) {
+                EdgeKind::UsesFrameworkFacade
+            } else {
+                EdgeKind::UsesFrameworkInternal
+            }
+        }
+        ProjectKind::FoundationService => {
+            if path_matches_areas(relative, target, &target.areas.public_clients) {
+                EdgeKind::UsesFoundationClient
+            } else {
+                EdgeKind::UsesFoundationInternal
+            }
+        }
+        ProjectKind::CoreInfra | ProjectKind::CoreInfraComponent => {
+            let surface = classify_core_infra_module(relative, target);
+            match surface {
+                DependencySurface::CoreInfraPublicModule => EdgeKind::UsesCoreInfraModule,
+                DependencySurface::CoreInfraInternalModule => EdgeKind::UsesCoreInfraInternalModule,
+                _ => EdgeKind::DependsOnProject,
+            }
+        }
+        ProjectKind::App | ProjectKind::ProtoRoot | ProjectKind::Tool => EdgeKind::DependsOnProject,
+    };
+    Some(DiscoveredEdge {
+        from_project: input.project.name.to_string(),
+        from_workspace: input.workspace.name.to_string(),
+        to_project: target.name.to_string(),
+        kind,
+        evidence: Some(relative.to_string()),
+    })
 }
 
 fn path_matches_areas(

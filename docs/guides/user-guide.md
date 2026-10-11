@@ -404,3 +404,7 @@ For a normal PR:
 6. Use `repoctl pr summary` to capture impact and review hints.
 
 When a command returns diagnostics, fix the manifest or boundary issue first. Downstream commands rely on the graph being valid.
+
+## Reliable execution, caching and Buf compatibility
+
+See [reliable governance v0.7](reliable-governance.md) for task prerequisites, explicit local cache contracts, Buf breaking checks, standalone CI, context budgets and Mermaid exports.

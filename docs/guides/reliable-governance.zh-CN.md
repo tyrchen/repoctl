@@ -1,0 +1,144 @@
+# 多语言仓库治理（v0.7）
+
+repoctl 的核心定位是为开发者、CI 和 AI 提供共同的架构、归属、依赖及变更影响模型。
+默认离线读取 Cargo、Node、Python 清单；仅显式的 `graph validate --mode full`
+可能运行 Cargo metadata。Doctor 的各项检查共享一次发现得到的快照，下一次调用重新发现。
+Node/Python 包索引和解析后的清单在每次建图内共享，下一次建图会重新读取。
+Cargo 虚拟 workspace 会展开成员及通配符，遵循排除规则，并读取成员的依赖、target 表和
+workspace 继承；不需要运行 Cargo。缺失成员或路径越出仓库会报错。
+Python 图发现也覆盖 Poetry 的开发、测试等依赖分组。
+本地包和路径依赖按最深的匹配项目归属分类；嵌套项目使用自己的公共/内部接口规则。
+
+## 任务与变更影响
+
+```bash
+repoctl affected --base origin/main --head HEAD --tasks check,test,build
+repoctl run check --affected --concurrency 4
+repoctl doctor --agent
+```
+
+Git 范围以 merge-base 为起点；未提供引用时包含暂存、未暂存、删除和未跟踪文件。
+重命名同时选择原位置和新位置的归属。影响沿项目依赖反向传播，覆盖基础设施及内部接口，
+并保留依赖证据和间接受影响项目的负责人。没有归属的文件产生警告。
+依赖模型以项目为单位，受影响项目的全部工作区都会被选中，确保覆盖同项目中依赖其他工作区的消费者。
+
+任务等待所有前置任务成功后执行；同一任务的多个命令按清单顺序执行，独立任务可以并发。
+失败跳过后续依赖任务，但独立分支继续。缺失依赖和循环是错误，并发范围为 1–256。
+每个任务的不同前置依赖并集最多为 256，超过上限会在展开依赖之前拒绝。
+默认超时 300 秒，每个输出流最多 1 MiB；通过 `timeout_seconds` 和 `max_output_bytes`
+调整。超时状态为 124，输出超限为 125。程序终止并回收直接子进程；本版本不提供进程树隔离。
+
+## Nx 思路的显式缓存契约
+
+```yaml
+tasks:
+  build:
+    - workspace: web
+      command: npm run build
+      cache:
+        enabled: true
+        inputs: ["apps/catalog/web/src/**", "apps/catalog/web/package.json"]
+        outputs: ["apps/catalog/web/dist"]
+        env: ["NODE_ENV"]
+        runtime: ["node --version"]
+```
+
+路径相对于仓库。输出必须位于所属 workspace 内，不能覆盖输入、配置、仓库元数据或其他任务输出。
+前缀检查比较保守，应使用具体源码模式，避免包含输出目录的整个 workspace `**` 模式。
+缓存键包含命令、指定环境、运行时探测、配置、项目及前置依赖的源码闭包。标准包管理器版本
+及 PATH 自动参与缓存键；其他外部环境或运行时输入应显式声明。
+
+仅缓存可重复、输出和日志不含秘密的任务。命中恢复文件、执行权限和空目录，并清除陈旧输出。
+失败和跳过的结果不会缓存；损坏条目产生警告并重新执行。存储位于 `.repoctl/cache/tasks`，
+单条目上限 64 MiB、4096 个文件或目录。缺失声明输出或缓存 I/O 失败会使任务失败。
+不提供远程缓存或后台 daemon；将 `.repoctl/cache/` 加入被管理仓库的 `.gitignore`。
+输入扫描最多遍历 100,000 个目录项、64 层并选中 20,000 个文件；未匹配的文件和空目录也计入遍历上限。
+只有启用缓存的输出声明会从源文件哈希中排除；禁用缓存的输出仍参与输入指纹。
+显式声明的输入即使位于其他任务已启用缓存的输出目录中，也会参与哈希。
+源码不应放在自动排除的 `target`、`dist`、`build`、`node_modules`、`.venv` 等产物目录中。
+
+若前置任务有任何命令未提供包含产物的缓存指纹，下游会报告警告并绕过缓存；这一规则沿任务链传播。
+
+```bash
+repoctl run build --no-cache
+```
+
+此选项同时绕过缓存读写。IaC 与 operations 执行不使用任务缓存。
+
+同一任务内按顺序执行的命令，也会把前序产物指纹纳入后续缓存键。
+前序命令没有可验证的产物指纹时，后续命令会跳过缓存，避免恢复过期结果。
+
+## Buf breaking 与真实 CI
+
+```bash
+repoctl proto check --against '.git#branch=main,subdir=protos' --format json
+repoctl proto check --against '.git#branch=main,subdir=protos' --execute
+repoctl ci workflow --write
+repoctl ci run-step --project apps.catalog --workspace web --task check --install
+```
+
+Proto 默认只规划命令；`--execute` 使用已安装的 Buf 执行 lint 和 breaking，违规使 CLI 失败。
+规则由配置 proto 根目录的 `buf.yaml` 管理，比较源可以是 Git、本地基线或 Buf registry。
+Registry 的认证和联网由 Buf 负责。Doctor 始终只规划这些命令。
+
+生成的 CI 使用 graph、任务矩阵和 required 三个 job，独立安装固定版本 CLI，安装所需工具链
+及依赖，并真正执行任务与前置任务。发现图不会自动安装依赖，安装需要 `--install`。
+CI 矩阵仅包含原始选中的任务，前置依赖在同一个 job 内执行；工具链选择仍覆盖完整依赖链。
+有锁文件时使用冻结安装。空矩阵可以跳过任务，但失败或取消不能通过 required 检查。
+protoc 检测覆盖 Cargo 成员、本地依赖及实际使用的 build script。
+
+**发布前提：**生成的 workflow 固定使用 `repoctl-cli =0.7.0`，外部仓库启用前需要按顺序发布
+workspace crates。本 PR 不发布版本；集成测试使用本地构建验证相同的工作流契约。
+
+## 有预算的上下文与图导出
+
+```bash
+repoctl context apps.catalog --changed-file apps/catalog/api/src/lib.rs --include-docs --max-bytes 65536
+repoctl graph print --diagram mermaid
+repoctl affected --changed-file frameworks/ui/src/index.ts --diagram mermaid
+```
+
+源码需要显式选择并属于指定项目；声明的文档可以是文件或目录。保护路径、生成代码、疑似秘密、
+二进制和符号链接会排除。JSON 包含内容哈希、截断及省略原因，预算计算序列化后的 UTF-8 字节，
+默认 64 KiB、最大 1 MiB，包括项目元数据。显式文件最多 256 个，总选择最多 512 个，文档目录
+遍历最多 32 层，所有声明目录合计最多访问 4,096 个目录项，空目录和被排除项也计入。
+元数据本身超过预算时返回错误。Mermaid 使用稳定 ID 和转义标签，不自动发布。
+文档排除规则使用仓库相对路径，检出目录上级的名称不会屏蔽项目文档。
+
+迁移覆盖通用 Cargo/Node 包，保留 Cargo 别名、features、optional、default-features 和 target
+配置；重名包及无法解析的 workspace 继承会失败。归类依据内容或 `--map`，任务依据实际
+workspace、Node scripts/TypeScript 配置及 Python 编译检查生成。Python 依赖源重写不在本版本内。
+混合仓库中的嵌套 Cargo 包也会生成任务，工作区名称在所有语言间保持唯一。
+Cargo 成员按真实工作区根目录及共享锁文件归组，任务使用 `--workspace`，完整验证每组只执行一次；
+独立嵌套包仍单独检查，有锁文件时完整验证使用 `--locked`。
+普通 Cargo 包的项目内路径依赖会继续向下发现；被实际引用的排除包也参与依赖发现。
+根目录 Rust 工具链及 Make/Just/Task 任务入口变更会选中全部工作区。
+根目录 `.cargo/config.toml`、旧版 `.cargo/config` 和 `pnpm-workspace.yaml` 变更同样选中全部工作区，
+这些配置也参与缓存指纹。
+Node 子包保留独立任务，并继承最近的锁文件及包管理器，CI 在锁文件所属目录安装依赖。
+没有锁文件时不会生成虚假的锁文件声明。
+Python 子包同样继承最近的 `uv.lock`，安装在锁文件所属目录执行 `uv sync --frozen`。
+Node 包没有锁文件时，任务、CI 和完整验证采用最近的 `packageManager` 声明；缺省时继承上级声明，
+仍无声明才使用 npm。已有锁文件的归属优先。
+
+自动改写 Node 依赖后，旧锁文件不会被复制；计划中的 `lockfileRefreshes` 列出必须执行的
+刷新命令。先执行 `adopt apply`，再在指定目录运行这些命令、提交新锁文件，最后执行
+`adopt verify`。缺失待刷新的锁文件会使验证失败。迁移本身不会运行包管理器。
+规划和应用前都会检查已有文件、重复目标以及与已有项目或其他迁移项目重名的情况；
+已有 `project.yaml` 或 `project.yml` 不会被覆盖。
+目标位于源目录内时，会从发现、扫描和复制中排除；源和目标不能是同一个目录。
+迁移限制为 20,000 个文件/最终操作、100,000 个目录项、256 个源仓库和 64 层深度；
+读取分析的文本单文件最多 256 KiB、累计最多 64 MiB，超限会明确失败。
+源文件操作记录原始字节的 BLAKE3 摘要，覆盖二进制文件和被改写的清单；应用前校验全部摘要，
+源文件变动、缺失或不可读会在写入前失败。没有摘要的旧计划须重新生成并审核。
+流式源文件哈希限制为单文件 256 MiB、所有源文件合计 1 GiB。
+保存计划在解析前限制为 64 MiB，应用和验证在同一入口检查全部集合数量；新生成的计划也遵守大小限制。
+只有 README 的源仓库根目录可以直接识别，映射为文档工具时不会生成虚假的构建任务。
+`--ci report-only` 保存的计划只包含预览，应用时不会创建或覆盖工作流；
+只有 `--ci update` 才写入生成的工作流。
+旧版二进制 `bun.lockb` 会正确选择 Bun，并在依赖不变时原样复制。
+依赖改写后，刷新命令明确生成 `bun.lock`，项目清单也同步使用新文本锁文件。
+
+
+Rust API 新增请求和执行字段，因此版本升级为 0.7.0；YAML 新选项均可省略。
+详细契约见[设计规格](../../specs/repoctl-reliable-governance-design.md)和[英文指南](reliable-governance.md)。

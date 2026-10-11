@@ -12,12 +12,14 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+blake3.workspace = true
 camino.workspace = true
 repoctl-core.workspace = true
 repoctl-engine.workspace = true
 repoctl-inspect.workspace = true
 repoctl-runner.workspace = true
 repoctl-scaffold.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
 toml_edit.workspace = true

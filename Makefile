@@ -6,6 +6,13 @@ build:
 test:
 	@cargo nextest run --all-features
 
+test-governance:
+	@cargo test -p repoctl-cli --test governance
+
+test-buf:
+	@test -n "$(REPOCTL_TEST_BUF)" || { echo "Set REPOCTL_TEST_BUF to an installed Buf executable"; exit 1; }
+	@cargo test -p repoctl-cli --test governance test_should_detect_a_real_buf_breaking_change -- --ignored
+
 check-agent-sync:
 	@cmp -s CLAUDE.md AGENTS.md || { \
 		echo "AGENTS.md must stay in sync with CLAUDE.md"; \
@@ -44,4 +51,4 @@ publish:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test check-agent-sync release publish-dry-run publish update-submodule
+.PHONY: build test test-governance test-buf check-agent-sync release publish-dry-run publish update-submodule

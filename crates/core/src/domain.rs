@@ -13,7 +13,11 @@ use globset::Glob;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::diagnostic::{Diagnostic, Severity};
+use crate::{
+    diagnostic::{Diagnostic, Severity},
+    execution::TaskExecutionOptions,
+    migration::LockfileRefresh,
+};
 
 const NAME_MAX_BYTES: usize = 128;
 const OWNER_MAX_BYTES: usize = 64;
@@ -981,6 +985,9 @@ pub struct WorkspaceSpec {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCommand {
+    /// Process limits and opt-in cache configuration.
+    #[serde(default)]
+    pub execution: TaskExecutionOptions,
     /// Workspace that should execute the command.
     pub workspace: WorkspaceName,
     /// Command in argv form.
@@ -1857,6 +1864,12 @@ pub struct AffectedReport {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AffectedReason {
+    /// Dependency edge kind for propagated impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_kind: Option<EdgeKind>,
+    /// Manifest or package evidence for propagated impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
     /// Changed or propagated source.
     pub source: String,
     /// Affected target.
@@ -1869,6 +1882,9 @@ pub struct AffectedReason {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRunRequest {
+    /// Bypass local cache reads and writes.
+    #[serde(default)]
+    pub no_cache: bool,
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
     /// Requested task names.
@@ -1895,6 +1911,9 @@ pub struct TaskRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRunPlan {
+    /// Originally selected task identities, excluding prerequisite-only tasks.
+    #[serde(default)]
+    pub selected_tasks: Vec<TaskDependency>,
     /// Planned process commands.
     pub commands: Vec<ProcessCommand>,
     /// Maximum concurrency.
@@ -1931,6 +1950,18 @@ pub struct TaskCommandOutput {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessCommand {
+    /// Stable fingerprints of completed prerequisite tasks.
+    #[serde(default)]
+    pub prerequisite_fingerprints: Vec<String>,
+    /// Prerequisite task identities.
+    #[serde(default)]
+    pub prerequisites: Vec<String>,
+    /// Process limits and opt-in cache configuration.
+    #[serde(default)]
+    pub execution: TaskExecutionOptions,
+    /// Absolute repository root for local task caching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<PathBuf>,
     /// Project id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectName>,
@@ -1957,6 +1988,15 @@ pub struct ProcessCommand {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessOutput {
+    /// Stable input/result fingerprint used by dependent cached tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Cache integrity warning when an entry was ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_warning: Option<String>,
+    /// Whether this successful output was restored from the local cache.
+    #[serde(default)]
+    pub cached: bool,
     /// Exit status code.
     pub status: i32,
     /// Captured stdout.
@@ -2168,6 +2208,9 @@ pub struct AdoptionPlan {
     pub operations: Vec<AdoptionFileOperation>,
     /// Dependency rewrite operations.
     pub dependency_rewrites: Vec<DependencyRewrite>,
+    /// Required lockfile regeneration after applying dependency rewrites.
+    #[serde(default)]
+    pub lockfile_refreshes: Vec<LockfileRefresh>,
     /// Synthesized manifests.
     pub manifest_syntheses: Vec<ProjectManifestSynthesis>,
     /// CI file operations.
@@ -2240,7 +2283,8 @@ pub struct AdoptionFileOperation {
     /// Optional UTF-8 replacement content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// File checksum when known.
+    /// Original source bytes as `blake3:<64 lowercase hex digits>`.
+    /// Required for source-backed operations, including rewritten manifests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
 }
@@ -2249,6 +2293,9 @@ pub struct AdoptionFileOperation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyRewrite {
+    /// Exact manifest table path for the dependency alias.
+    #[serde(default)]
+    pub table: Vec<String>,
     /// File being rewritten.
     pub file: RepoRelativePath,
     /// Package or crate dependency name.
@@ -2325,6 +2372,15 @@ pub struct PrSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiContextRequest {
+    /// Explicit changed source files to include.
+    #[serde(default)]
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Include project-declared documentation.
+    #[serde(default)]
+    pub include_docs: bool,
+    /// Maximum serialized enriched context bytes.
+    #[serde(default = "default_context_budget")]
+    pub max_bytes: usize,
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
     /// Project to build context for.
@@ -2367,6 +2423,12 @@ pub struct CodegenCheckReport {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtoFacadeRequest {
+    /// Buf comparison source for breaking-change detection.
+    #[serde(default)]
+    pub against: Option<String>,
+    /// Execute Buf checks instead of only planning.
+    #[serde(default)]
+    pub execute: bool,
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
     /// Proto operation.
@@ -2399,6 +2461,9 @@ pub enum ProtoOperation {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtoFacadeReport {
+    /// Outputs from executed Buf commands.
+    #[serde(default)]
+    pub outputs: Vec<ProcessOutput>,
     /// Matching owner projects.
     pub owners: Vec<ProjectName>,
     /// Matching consumer projects.
@@ -3078,6 +3143,10 @@ fn default_code_size_excludes() -> Vec<RepoGlob> {
     .into_iter()
     .filter_map(|pattern| RepoGlob::new(pattern).ok())
     .collect()
+}
+
+fn default_context_budget() -> usize {
+    65_536
 }
 
 #[cfg(test)]

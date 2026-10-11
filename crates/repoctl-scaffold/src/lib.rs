@@ -3020,8 +3020,8 @@ mod tests {
                 dry_run: false,
             })
             .expect("check");
-        assert!(!report.diagnostics.is_empty());
-        assert!(!report.diffs.is_empty());
+        assert_ne!(report.diagnostics.len(), 0);
+        assert_ne!(report.diffs.len(), 0);
         let report = service
             .skills(&SkillsFacadeRequest {
                 repo: Some(temp.path().to_path_buf()),
@@ -3029,8 +3029,8 @@ mod tests {
                 dry_run: false,
             })
             .expect("sync");
-        assert!(report.diagnostics.is_empty());
-        assert!(report.diffs.is_empty());
+        assert_eq!(report.diagnostics.len(), 0);
+        assert_eq!(report.diffs.len(), 0);
         let skill =
             fs::read_to_string(temp.path().join(".agents/skills/repoctl/SKILL.md")).expect("skill");
         assert!(skill.contains("name: \"repoctl\""));

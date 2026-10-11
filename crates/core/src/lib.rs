@@ -14,7 +14,9 @@
 
 pub mod diagnostic;
 pub mod domain;
+pub mod execution;
 pub mod manifest;
+pub mod migration;
 pub mod ports;
 
 pub use diagnostic::{
@@ -53,7 +55,9 @@ pub use domain::{
     ToolPrerequisite, Toolchain, ValidationMode, VerificationPlan, Visibility, WorkspaceLanguage,
     WorkspaceName, WorkspaceSpec, utf8_path_buf, validate_project_convention,
 };
+pub use execution::{TaskCacheConfig, TaskExecutionOptions};
 pub use manifest::{ManifestSource, YamlManifestParser};
+pub use migration::LockfileRefresh;
 pub use ports::{
     DiscoveredEdge, FixedRepoLocator, GraphBuildInput, GraphBuilder, InMemoryRepoFileSystem,
     ManifestParser, PolicyContext, PolicyRule, ProcessRunner, RenderRequest, RenderedTemplate,

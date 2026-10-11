@@ -28,7 +28,7 @@ CLI 只负责参数解析、调用 facade、渲染输出、处理退出码。不
 仓库使用 Rust 2024，版本写在 `rust-toolchain.toml`。
 
 ```bash
-rustup toolchain install 1.96.0
+rustup toolchain install 1.99.0
 cargo --version
 ```
 
