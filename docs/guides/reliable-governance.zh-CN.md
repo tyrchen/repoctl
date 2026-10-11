@@ -6,6 +6,7 @@ repoctl 的核心定位是为开发者、CI 和 AI 提供共同的架构、归�
 Node/Python 包索引和解析后的清单在每次建图内共享，下一次建图会重新读取。
 Cargo 虚拟 workspace 会展开成员及通配符，遵循排除规则，并读取成员的依赖、target 表和
 workspace 继承；不需要运行 Cargo。缺失成员或路径越出仓库会报错。
+Python 图发现也覆盖 Poetry 的开发、测试等依赖分组。
 
 ## 任务与变更影响
 
@@ -51,6 +52,8 @@ tasks:
 不提供远程缓存或后台 daemon；将 `.repoctl/cache/` 加入被管理仓库的 `.gitignore`。
 源码不应放在自动排除的 `target`、`dist`、`build`、`node_modules`、`.venv` 等产物目录中。
 
+若前置任务有任何命令未提供包含产物的缓存指纹，下游会报告警告并绕过缓存；这一规则沿任务链传播。
+
 ```bash
 repoctl run build --no-cache
 ```
@@ -74,6 +77,7 @@ Registry 的认证和联网由 Buf 负责。Doctor 始终只规划这些命令�
 及依赖，并真正执行任务与前置任务。发现图不会自动安装依赖，安装需要 `--install`。
 CI 矩阵仅包含原始选中的任务，前置依赖在同一个 job 内执行；工具链选择仍覆盖完整依赖链。
 有锁文件时使用冻结安装。空矩阵可以跳过任务，但失败或取消不能通过 required 检查。
+protoc 检测覆盖 Cargo 成员、本地依赖及实际使用的 build script。
 
 **发布前提：**生成的 workflow 固定使用 `repoctl-cli =0.7.0`，外部仓库启用前需要按顺序发布
 workspace crates。本 PR 不发布版本；集成测试使用本地构建验证相同的工作流契约。
@@ -96,6 +100,7 @@ repoctl affected --changed-file frameworks/ui/src/index.ts --diagram mermaid
 workspace、Node scripts/TypeScript 配置及 Python 编译检查生成。Python 依赖源重写不在本版本内。
 Node 子包保留独立任务，并继承最近的锁文件及包管理器，CI 在锁文件所属目录安装依赖。
 没有锁文件时不会生成虚假的锁文件声明。
+Python 子包同样继承最近的 `uv.lock`，安装在锁文件所属目录执行 `uv sync --frozen`。
 
 自动改写 Node 依赖后，旧锁文件不会被复制；计划中的 `lockfileRefreshes` 列出必须执行的
 刷新命令。先执行 `adopt apply`，再在指定目录运行这些命令、提交新锁文件，最后执行

@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 113 regular tests and seven doctests. The separately
+The workspace suite contains 118 regular tests and eight doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -160,3 +160,35 @@ core domain and facade roots. The all-source scan remains at 13 existing warning
 no policy thresholds were changed. Dependencies, lockfiles, agent instructions and
 Buf execution are unchanged in this follow-up, so audit/deny, agent sync and the
 separate local real-Buf gate were not repeated; hosted CI still exercises real Buf.
+
+
+## Cache, CI and Python review follow-up
+
+Four additional findings are valid and fixed; the Windows rename finding is rejected
+with the primary [Rust 1.99 API contract](https://doc.rust-lang.org/std/fs/fn.rename.html):
+rename replaces existing regular destination files on Windows as well as Unix.
+The existing corrupt-cache regression exercises this replacement; removing the old
+file first would lose the atomic replacement behavior.
+
+Five new tests in [cache dependencies](../apps/repoctl-cli/tests/regressions/cache_dependencies.rs)
+and [language/CI review cases](../apps/repoctl-cli/tests/regressions/review_round_two.rs) cover:
+
+- A silent uncached generator changes excluded `dist` files from an environment
+  input. Both cached descendants bypass with warnings and produce current results.
+  Fully cached prerequisites allow hits and invalidate descendants on artifact changes;
+  a mixed cached/uncached prerequisite group remains ineligible for descendant caching.
+- Protoc flags for member build dependencies, renamed target dependencies, default
+  build scripts, custom build paths and repository-local dependency build scripts.
+  Disabled scripts and unused excluded members do not enable the flag. Detection
+  shares bounded offline Cargo traversal with graph inspection.
+- Direct adoption of pure Python repositories, nearest uv locks and nested overrides.
+  A fake uv executable verifies `sync --frozen` at the root lock owner and the
+  generated Python check in the selected package directory.
+- Poetry dev/optional QA groups with local paths and normalized distribution-name
+  references. Both edges and affected consumers are verified offline.
+
+Build, 118 workspace tests, eight doctests, nextest, nightly formatting and strict
+pedantic clippy pass. Doctor and changed-source size checks pass in the managed
+fixture with zero findings across 11 changed Rust files. The all-source scan still
+has 13 pre-existing warnings. Dependencies and release packaging did not change;
+audit/deny were not repeated. Real Buf remains exercised by hosted CI.

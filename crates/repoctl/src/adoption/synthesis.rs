@@ -10,7 +10,11 @@ use repoctl_core::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{node::node_install, placement::PlacementDecision, process_command};
+use super::{
+    node::{nearest_lockfile, node_install},
+    placement::PlacementDecision,
+    process_command,
+};
 
 pub(super) fn synthesize_project_manifest(
     source_path: &Utf8Path,
@@ -135,9 +139,11 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
         } else {
             format!("python-{}", root.replace('/', "-"))
         };
+        let lockfile = nearest_lockfile(inventory, root, &["uv.lock"])
+            .map_or_else(String::new, |path| format!("    lockfile: {path}\n"));
         workspaces.push(format!(
             "  - name: {name}\n    language: python\n    toolchain: uv\n    root: {root}\n    \
-             manifest: {manifest}\n"
+             manifest: {manifest}\n{lockfile}"
         ));
     }
     if inventory.manifests.iter().any(|path| path == "Pulumi.yaml") {

@@ -56,6 +56,13 @@ pub(super) fn run(
         return runner.run(command);
     }
     validate_outputs(command, snapshot)?;
+    if command.prerequisite_fingerprints.len() != command.prerequisites.len() {
+        let mut output = runner.run(command)?;
+        output.fingerprint = None;
+        output.cache_warning =
+            Some("cache bypassed: prerequisite task has no artifact-aware fingerprint".to_string());
+        return Ok(output);
+    }
     let key = fingerprint(runner, command, snapshot)?;
     let root = snapshot.root.absolute.as_std_path();
     let dir = root.join(".repoctl/cache/tasks");

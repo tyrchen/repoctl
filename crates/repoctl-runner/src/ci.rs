@@ -10,8 +10,10 @@ use std::{
 
 use repoctl_core::{
     ProcessCommand, ProcessOutput, ProcessRunner, RepoRelativePath, RepoSnapshot, RepoctlError,
-    TaskDependency, TaskExecutionOptions, TaskRunPlan, Toolchain, WorkspaceLanguage,
+    TaskDependency, TaskExecutionOptions, TaskRunPlan, Toolchain, WorkspaceInspectionInput,
+    WorkspaceLanguage,
 };
+use repoctl_engine::LocalRustWorkspaceInspector;
 use serde_json::{Value, json};
 
 pub(super) fn entries(
@@ -91,15 +93,15 @@ pub(super) fn entry(
                 .project
                 .as_ref()
                 .and_then(|name| snapshot.project(name))
+                && spec.language == WorkspaceLanguage::Rust
             {
-                let manifest = project
-                    .path
-                    .join_project(&spec.manifest)
-                    .map_err(RepoctlError::diagnostic)?;
-                let path = snapshot.root.join(&manifest);
-                needs_protoc |= fs::metadata(&path).is_ok_and(|m| m.len() <= 262_144)
-                    && fs::read_to_string(&path)
-                        .is_ok_and(|s| s.contains("prost-build") || s.contains("tonic-build"));
+                needs_protoc |=
+                    LocalRustWorkspaceInspector.requires_protoc(&WorkspaceInspectionInput {
+                        root: &snapshot.root,
+                        project,
+                        workspace: spec,
+                        projects: &snapshot.projects,
+                    })?;
             }
         }
     }

@@ -82,6 +82,9 @@ output roots must be strictly inside the owning workspace, may not overlap input
 configuration, another task's outputs, or repository metadata. All caching is opt-in
 for reproducible, non-secret build/check tasks. IaC/DNS/operations commands remain
 uncached. `run --no-cache` bypasses both reads and writes without changing selection.
+Cached dependents require artifact-aware fingerprints from every command in every
+prerequisite task. Uncached or partially cached prerequisites cause cache bypass
+with a warning, transitively; exit status and logs are never substitute fingerprints.
 
 Timeouts terminate the direct child; portable process-tree isolation is outside this
 change. Pipe reads also have the same deadline, so descendants holding inherited
@@ -122,6 +125,8 @@ Declared Cargo workspace roots expand explicit and globbed `members`, honor `exc
 and inspect member dependency/target tables plus implicit in-workspace path packages.
 Traversal is offline and bounded to 4096 packages, 100000 entries and 64 levels;
 missing member manifests, malformed patterns and repository escapes fail explicitly.
+Poetry dependency groups are inspected alongside its top-level dependency table;
+both local paths and normalized local distribution names contribute graph edges.
 
 An affected reason records source, target, reason and optional edge kind/evidence.
 Reverse traversal uses a queue and all project dependency surfaces. Reviewers come
@@ -155,6 +160,9 @@ permissions are explicit. Required succeeds only when graph succeeds and tasks
 succeeds or was intentionally skipped for an empty matrix. Cancellation is failure.
 A generated workflow is tested structurally and by running its CLI-selected task
 locally in a standalone fixture; hosted execution is validated by the PR's own CI.
+Protoc requirements inspect the same bounded Cargo members and repository-local
+path dependency closure, including default or explicitly configured build scripts.
+Disabled build scripts and unreferenced excluded members do not require protoc.
 
 ## Migration correctness
 
@@ -172,6 +180,8 @@ Node package task workspaces retain their package roots while inheriting the nea
 lockfile-owning directory's package manager and project-relative lockfile path.
 Packages without a lockfile do not declare an invented one. CI installs from the
 owning directory and runs scripts from the package directory.
+Python packages likewise inherit their nearest existing `uv.lock`; pure Python
+repositories are recognized directly through their root `pyproject.toml`.
 
 Automatic Node dependency rewrites invalidate the owner's copied lockfile. Plans
 expose deduplicated `lockfileRefreshes` with a destination lockfile and a typed

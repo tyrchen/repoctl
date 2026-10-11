@@ -19,7 +19,7 @@ use repoctl_core::{
     WorkspaceInspectionInput, WorkspaceInspector, WorkspaceLanguage,
 };
 use serde_json::Value;
-use toml_edit::{DocumentMut, Item};
+use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::adapters::classify_path_dependency;
 
@@ -28,6 +28,31 @@ const MAX_MANIFEST_BYTES: u64 = 262_144;
 /// Cargo path-dependency inspection using only local TOML files.
 #[derive(Clone, Debug, Default)]
 pub struct LocalRustWorkspaceInspector;
+
+impl LocalRustWorkspaceInspector {
+    /// Detects protobuf compiler requirements across the offline Cargo workspace.
+    ///
+    /// Examines member manifests and their configured or default build scripts.
+    ///
+    /// ```no_run
+    /// use repoctl_core::{RepoctlError, WorkspaceInspectionInput};
+    /// use repoctl_engine::LocalRustWorkspaceInspector;
+    /// fn needs_protoc(input: &WorkspaceInspectionInput<'_>) -> Result<bool, RepoctlError> {
+    ///     LocalRustWorkspaceInspector.requires_protoc(input)
+    /// }
+    /// ```
+    pub fn requires_protoc(
+        &self,
+        input: &WorkspaceInspectionInput<'_>,
+    ) -> Result<bool, RepoctlError> {
+        let path = manifest_path(input)?;
+        let Some(text) = read_manifest(&path, input.root.absolute.as_std_path())? else {
+            return Ok(false);
+        };
+        let doc = parse_toml(&text, &path)?;
+        cargo::requires_protoc(input, &path, &doc)
+    }
+}
 
 impl WorkspaceInspector for LocalRustWorkspaceInspector {
     fn language(&self) -> WorkspaceLanguage {
@@ -162,16 +187,36 @@ fn python_edges(
         ["tool", "poetry", "dependencies"],
     ] {
         if let Some(deps) = toml_path(doc.as_item(), &parts).and_then(Item::as_table_like) {
-            for (name, source) in deps.iter() {
-                if let Some(local) = source.get("path").and_then(Item::as_str) {
-                    append_path_edge(input, path, local, name, &mut edges)?;
-                } else if let Some(target) = names.get(&normalize_python_name(name)) {
-                    append_target_edge(input, target, path, name, &mut edges);
-                }
+            python_source_edges(input, path, deps, names, &mut edges)?;
+        }
+    }
+    if let Some(groups) =
+        toml_path(doc.as_item(), &["tool", "poetry", "group"]).and_then(Item::as_table_like)
+    {
+        for (_, group) in groups.iter() {
+            if let Some(deps) = group.get("dependencies").and_then(Item::as_table_like) {
+                python_source_edges(input, path, deps, names, &mut edges)?;
             }
         }
     }
     Ok(edges)
+}
+
+fn python_source_edges(
+    input: &WorkspaceInspectionInput<'_>,
+    path: &Path,
+    deps: &dyn TableLike,
+    names: &BTreeMap<String, RepoRelativePath>,
+    edges: &mut Vec<DiscoveredEdge>,
+) -> Result<(), RepoctlError> {
+    for (name, source) in deps.iter() {
+        if let Some(local) = source.get("path").and_then(Item::as_str) {
+            append_path_edge(input, path, local, name, edges)?;
+        } else if let Some(target) = names.get(&normalize_python_name(name)) {
+            append_target_edge(input, target, path, name, edges);
+        }
+    }
+    Ok(())
 }
 
 fn python_requirements(
@@ -330,7 +375,7 @@ fn toml_path<'a>(item: &'a Item, parts: &[&str]) -> Option<&'a Item> {
 
 fn cargo_tables(
     doc: &DocumentMut,
-    callback: &mut impl FnMut(&dyn toml_edit::TableLike) -> Result<(), RepoctlError>,
+    callback: &mut impl FnMut(&dyn TableLike) -> Result<(), RepoctlError>,
 ) -> Result<(), RepoctlError> {
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
         if let Some(table) = doc.get(section).and_then(Item::as_table_like) {

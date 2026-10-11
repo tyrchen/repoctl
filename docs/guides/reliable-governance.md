@@ -81,6 +81,10 @@ repoctl run build --no-cache
 This bypasses both cache reads and writes. IaC and operations execution does not
 use the task cache.
 
+Cached dependents require artifact-aware fingerprints from every prerequisite
+command. An uncached or partly cached prerequisite bypasses descendant caching
+with a warning; successful exit status and identical logs cannot prove unchanged artifacts.
+
 ## Buf compatibility
 
 Keep lint/breaking policies in `buf.yaml` at the configured proto root. repoctl
@@ -151,6 +155,10 @@ including inherited, target-specific and implicit member path dependencies.
 Node child packages keep their scripts while inheriting the nearest lockfile owner
 and package manager; CI installs in the owner directory. Unlocked packages do not
 declare invented lockfiles.
+Python packages inherit their nearest existing `uv.lock`, with frozen installation
+in its owner directory. Offline discovery includes Poetry development/test groups.
+CI protoc requirements include Cargo members, local path dependencies and active
+default/custom build scripts.
 
 Automatic Node rewrites omit stale locks and expose required `lockfileRefreshes`.
 After `adopt apply`, run these commands in their declared directories, commit the

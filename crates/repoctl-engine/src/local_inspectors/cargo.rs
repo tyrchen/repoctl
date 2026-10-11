@@ -23,16 +23,87 @@ pub(super) fn inspect(
     manifest: &Path,
     doc: &DocumentMut,
 ) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
+    let mut edges = Vec::new();
+    walk(
+        input,
+        manifest,
+        doc,
+        false,
+        &mut |_, _| Ok(()),
+        &mut |origin, local, name| append_path_edge(input, origin, local, name, &mut edges),
+    )?;
+    Ok(edges)
+}
+
+pub(super) fn requires_protoc(
+    input: &WorkspaceInspectionInput<'_>,
+    manifest: &Path,
+    doc: &DocumentMut,
+) -> Result<bool, RepoctlError> {
+    let mut required = false;
+    walk(
+        input,
+        manifest,
+        doc,
+        true,
+        &mut |path, document| {
+            let text = document.to_string();
+            required |= text.contains("prost-build")
+                || text.contains("tonic-build")
+                || text.contains("protobuf-codegen");
+            if let Some(package) = document.get("package") {
+                let build = package.get("build");
+                if build.and_then(Item::as_bool) != Some(false) {
+                    let script = build.and_then(Item::as_str).unwrap_or("build.rs");
+                    if script.len() > 4096 || script.contains('\0') {
+                        return Err(manifest_error(path, "invalid Cargo build script path"));
+                    }
+                    let parent = path
+                        .parent()
+                        .ok_or_else(|| manifest_error(path, "manifest has no parent"))?;
+                    if let Some(text) =
+                        read_manifest(&parent.join(script), input.root.absolute.as_std_path())?
+                    {
+                        required |= text.contains("protoc")
+                            || text.contains("prost_build")
+                            || text.contains("tonic_build");
+                    }
+                }
+            }
+            Ok(())
+        },
+        &mut |_, _, _| Ok(()),
+    )?;
+    Ok(required)
+}
+
+fn walk(
+    input: &WorkspaceInspectionInput<'_>,
+    manifest: &Path,
+    doc: &DocumentMut,
+    follow_external_paths: bool,
+    on_manifest: &mut impl FnMut(&Path, &DocumentMut) -> Result<(), RepoctlError>,
+    on_dependency: &mut impl FnMut(&Path, &str, &str) -> Result<(), RepoctlError>,
+) -> Result<(), RepoctlError> {
     let directory = manifest
         .parent()
         .ok_or_else(|| manifest_error(manifest, "manifest has no parent"))?;
     let excluded = patterns(doc, "exclude", manifest)?;
+    let dependency_excludes = if follow_external_paths {
+        GlobSet::empty()
+    } else {
+        excluded.clone()
+    };
+    let dependency_root = if follow_external_paths {
+        input.root.absolute.as_std_path()
+    } else {
+        directory
+    };
     let mut queue = VecDeque::from([(manifest.to_path_buf(), doc.clone())]);
     for member in members(directory, manifest, doc, &excluded, input)? {
         queue.push_back((member.clone(), required_manifest(&member, input)?));
     }
     let mut visited = BTreeSet::new();
-    let mut edges = Vec::new();
     while let Some((path, document)) = queue.pop_front() {
         if !visited.insert(path.clone()) {
             continue;
@@ -43,6 +114,7 @@ pub(super) fn inspect(
                 "Cargo workspace exceeds 4096 packages",
             ));
         }
+        on_manifest(&path, &document)?;
         cargo_tables(&document, &mut |table| {
             for (name, item) in table.iter() {
                 let dependency = if let Some(local) = item.get("path").and_then(Item::as_str) {
@@ -53,10 +125,16 @@ pub(super) fn inspect(
                     None
                 };
                 if let Some((origin, local)) = dependency {
-                    append_path_edge(input, &origin, &local, name, &mut edges)?;
-                    if doc.get("workspace").is_some() {
+                    on_dependency(&origin, &local, name)?;
+                    if follow_external_paths || doc.get("workspace").is_some() {
                         enqueue_path_package(
-                            &origin, &local, directory, &excluded, input, &visited, &mut queue,
+                            &origin,
+                            &local,
+                            dependency_root,
+                            &dependency_excludes,
+                            input,
+                            &visited,
+                            &mut queue,
                         )?;
                     }
                 }
@@ -64,7 +142,7 @@ pub(super) fn inspect(
             Ok(())
         })?;
     }
-    Ok(edges)
+    Ok(())
 }
 
 fn enqueue_path_package(

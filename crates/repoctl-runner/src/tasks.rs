@@ -139,16 +139,17 @@ fn store_completion(
     results: &mut BTreeMap<usize, (ProcessCommand, ProcessOutput)>,
 ) {
     let mut digest = blake3::Hasher::new();
+    let mut artifact_aware = success;
     for (_, _, output) in &outputs {
         if let Some(fingerprint) = &output.fingerprint {
             digest.update(fingerprint.as_bytes());
         } else {
-            digest.update(&output.status.to_le_bytes());
-            digest.update(output.stdout.as_bytes());
-            digest.update(output.stderr.as_bytes());
+            artifact_aware = false;
         }
     }
-    fingerprints.insert(id.clone(), digest.finalize().to_hex().to_string());
+    if artifact_aware {
+        fingerprints.insert(id.clone(), digest.finalize().to_hex().to_string());
+    }
     completed.insert(id, success);
     for (index, command, output) in outputs {
         results.insert(index, (command, output));

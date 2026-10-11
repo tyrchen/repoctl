@@ -13,6 +13,7 @@ pub(super) fn source_repositories(
     source_root: &Utf8Path,
 ) -> Result<Vec<Utf8PathBuf>, RepoctlError> {
     if source_root.join("Cargo.toml").is_file()
+        || source_root.join("pyproject.toml").is_file()
         || source_root.join("package.json").is_file()
         || source_root.join("project.yaml").is_file()
         || source_root.join("Pulumi.yaml").is_file()
@@ -32,6 +33,7 @@ pub(super) fn source_repositories(
         })?;
         if path.is_dir()
             && (path.join("Cargo.toml").is_file()
+                || path.join("pyproject.toml").is_file()
                 || path.join("package.json").is_file()
                 || path.join("project.yaml").is_file()
                 || path.join("Pulumi.yaml").is_file()
