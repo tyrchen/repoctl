@@ -8,11 +8,13 @@ use std::{
 };
 
 use globset::{Glob, GlobSetBuilder};
-use ignore::WalkBuilder;
 use repoctl_core::{
     AiContextRequest, Diagnostic, ProjectManifest, RepoRelativePath, RepoSnapshot, RepoctlError,
 };
 use serde_json::{Value, json};
+
+const MAX_DOC_ENTRIES: usize = 4096;
+const MAX_CONTEXT_FILES: usize = 512;
 
 pub(super) fn enrich(
     mut payload: Value,
@@ -125,7 +127,9 @@ fn selected_paths(
         .cloned()
         .collect::<BTreeSet<_>>();
     if request.include_docs {
+        let mut visited = 0_usize;
         for doc in &project.ai.docs {
+            visit_document_entry(&mut visited)?;
             let path = project
                 .path
                 .join_project(doc)
@@ -138,40 +142,79 @@ fn selected_paths(
                     .take_while(|p| p.starts_with(snapshot.root.absolute.as_std_path()))
                     .all(|p| !fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
             {
-                for entry in WalkBuilder::new(&absolute)
-                    .hidden(false)
-                    .follow_links(false)
-                    .max_depth(Some(32))
-                    .filter_entry(|entry| !excluded(entry.path().to_string_lossy().as_ref()))
-                    .build()
-                {
-                    let entry =
-                        entry.map_err(|error| RepoctlError::Environment(error.to_string()))?;
-                    if entry
-                        .file_type()
-                        .is_some_and(|kind| kind.is_file() || kind.is_symlink())
-                    {
-                        let relative = entry
-                            .path()
-                            .strip_prefix(snapshot.root.absolute.as_std_path())
-                            .map_err(|error| RepoctlError::Environment(error.to_string()))?;
-                        paths.insert(
-                            RepoRelativePath::new(relative.to_string_lossy().replace('\\', "/"))
-                                .map_err(RepoctlError::diagnostic)?,
-                        );
-                    }
-                    if paths.len() > 512 {
-                        return Err(RepoctlError::Environment(
-                            "context selection exceeds 512 files".to_string(),
-                        ));
-                    }
-                }
+                collect_documents(
+                    snapshot.root.absolute.as_std_path(),
+                    absolute.as_std_path(),
+                    &mut paths,
+                    &mut visited,
+                )?;
             } else {
                 paths.insert(path);
             }
+            validate_selection(&paths)?;
         }
     }
     Ok(paths)
+}
+
+fn collect_documents(
+    root: &Path,
+    directory: &Path,
+    paths: &mut BTreeSet<RepoRelativePath>,
+    visited: &mut usize,
+) -> Result<(), RepoctlError> {
+    if excluded(directory.to_string_lossy().as_ref()) {
+        return Ok(());
+    }
+    let mut pending = vec![(directory.to_path_buf(), 0_usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| RepoctlError::io(directory.display().to_string(), error))?
+        {
+            visit_document_entry(visited)?;
+            let entry =
+                entry.map_err(|error| RepoctlError::io(directory.display().to_string(), error))?;
+            let path = entry.path();
+            if excluded(path.to_string_lossy().as_ref()) {
+                continue;
+            }
+            let kind = entry
+                .file_type()
+                .map_err(|error| RepoctlError::io(path.display().to_string(), error))?;
+            if kind.is_dir() && depth < 31 {
+                pending.push((path, depth.saturating_add(1)));
+            } else if kind.is_file() || kind.is_symlink() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| RepoctlError::Environment(error.to_string()))?;
+                paths.insert(
+                    RepoRelativePath::new(relative.to_string_lossy().replace('\\', "/"))
+                        .map_err(RepoctlError::diagnostic)?,
+                );
+                validate_selection(paths)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn visit_document_entry(visited: &mut usize) -> Result<(), RepoctlError> {
+    *visited = visited.saturating_add(1);
+    if *visited > MAX_DOC_ENTRIES {
+        return Err(RepoctlError::Environment(format!(
+            "context documentation traversal exceeds {MAX_DOC_ENTRIES} entries"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_selection(paths: &BTreeSet<RepoRelativePath>) -> Result<(), RepoctlError> {
+    if paths.len() > MAX_CONTEXT_FILES {
+        return Err(RepoctlError::Environment(format!(
+            "context selection exceeds {MAX_CONTEXT_FILES} files"
+        )));
+    }
+    Ok(())
 }
 
 fn initialize(payload: &mut Value, budget: usize) {

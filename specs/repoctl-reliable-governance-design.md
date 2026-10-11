@@ -274,7 +274,10 @@ Buf owns rules/categories through `buf.yaml`; repoctl does not duplicate its par
 
 Context source inclusion is explicit, project-scoped and excludes do-not-edit,
 generated, binary, secret-like and symlink paths. Documentation inclusion uses
-declared files or directories, at most 512 total selected files and 32 directory levels. Budget is UTF-8 bytes (default 64 KiB, max 1 MiB), not a model-specific
+declared files or directories, at most 512 total selected files, 4096 visited entries
+across all declared roots (including empty or excluded entries), and 32 directory
+levels. Enumeration stops at the shared entry budget before filtering paths.
+Budget is UTF-8 bytes (default 64 KiB, max 1 MiB), not a model-specific
 token estimate. Include each snippet's repo path/hash/truncation and reasons for
 omissions, and bound serialized enriched output including metadata. Reject a budget
 too small for mandatory metadata. Context reads use canonical containment checks.

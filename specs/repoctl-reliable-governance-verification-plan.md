@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 143 regular tests and nine doctests. The separately
+The workspace suite contains 144 regular tests and nine doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -348,4 +348,23 @@ no errors and retains only the existing `core/domain.rs` file-size warning (that
 file changes documentation only); the other 13 changed Rust files pass scoped size
 checks without findings. All-source inspection retains 13 existing warnings. Agent instructions, release packaging and Buf execution are
 unchanged, so agent synchronization and local real-Buf execution were not repeated.
+Hosted Linux CI continues to exercise real Buf.
+
+
+## Documentation traversal review follow-up
+
+The documentation walker previously bounded selected files and depth but not empty
+directory breadth. It now counts up to 4096 visited entries across all declared
+roots before path filtering. Bounded iterative enumeration stops immediately at
+that shared budget, including excluded entries, while preserving the 512 selected
+file limit, 32-level depth and symlink/secret protections. The regression in
+[context contracts](../apps/repoctl-cli/tests/regressions/contracts.rs) confirms a
+normal two-root selection works and rejects both ordinary and secret-like empty
+directory trees whose combined breadth exceeds the budget.
+
+Build, 144 regular tests, nine doctests, 144 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. Doctor and both changed Rust
+files pass without findings; all-source inspection retains 13 existing warnings.
+Dependencies, packaging, agent instructions and Buf execution are unchanged, so
+supply-chain, agent synchronization and local real-Buf gates were not repeated.
 Hosted Linux CI continues to exercise real Buf.

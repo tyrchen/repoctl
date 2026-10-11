@@ -274,3 +274,41 @@ fn test_should_include_declared_document_directories_and_exclude_secrets() -> Te
     assert!(text.len() <= 4096);
     Ok(())
 }
+
+#[test]
+fn test_should_cap_all_document_entries_across_declared_directories() -> TestResult {
+    for prefix in ["empty", ".env-empty"] {
+        let temp = fixture()?;
+        app(temp.path(), "ai:\n  docs: [docs-one, docs-two]\n")?;
+        for directory in ["docs-one", "docs-two"] {
+            write(
+                temp.path(),
+                &format!("apps/catalog/{directory}/guide.md"),
+                "declared documentation",
+            )?;
+        }
+        let args = [
+            "context",
+            "apps.catalog",
+            "--include-docs",
+            "--max-bytes",
+            "4096",
+        ];
+        let output = cli(temp.path(), &args)?;
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("declared documentation"));
+        for directory in ["docs-one", "docs-two"] {
+            let root = temp.path().join(format!("apps/catalog/{directory}"));
+            for index in 0..2050 {
+                fs::create_dir(root.join(format!("{prefix}-{index}")))?;
+            }
+        }
+        let output = cli(temp.path(), &args)?;
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("documentation traversal exceeds 4096 entries")
+        );
+    }
+    Ok(())
+}

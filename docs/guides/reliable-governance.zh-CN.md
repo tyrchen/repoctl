@@ -97,7 +97,8 @@ repoctl affected --changed-file frameworks/ui/src/index.ts --diagram mermaid
 源码需要显式选择并属于指定项目；声明的文档可以是文件或目录。保护路径、生成代码、疑似秘密、
 二进制和符号链接会排除。JSON 包含内容哈希、截断及省略原因，预算计算序列化后的 UTF-8 字节，
 默认 64 KiB、最大 1 MiB，包括项目元数据。显式文件最多 256 个，总选择最多 512 个，文档目录
-遍历最多 32 层。元数据本身超过预算时返回错误。Mermaid 使用稳定 ID 和转义标签，不自动发布。
+遍历最多 32 层，所有声明目录合计最多访问 4,096 个目录项，空目录和被排除项也计入。
+元数据本身超过预算时返回错误。Mermaid 使用稳定 ID 和转义标签，不自动发布。
 
 迁移覆盖通用 Cargo/Node 包，保留 Cargo 别名、features、optional、default-features 和 target
 配置；重名包及无法解析的 workspace 继承会失败。归类依据内容或 `--map`，任务依据实际

@@ -144,7 +144,8 @@ directories. Protected/generated, secret-like, binary and symlink paths are
 excluded. Enriched JSON includes hashes, truncation and omission reasons. Budgets
 are serialized UTF-8 bytes (default 64 KiB, maximum 1 MiB), including metadata.
 At most 256 explicit changed files and 512 total selected files are supported;
-documentation walking is limited to 32 directory levels. A budget too small for
+documentation walking is limited to 32 directory levels and 4096 visited entries
+across all declared roots, including empty directories and excluded entries. A budget too small for
 mandatory metadata is an error. Mermaid output uses deterministic IDs and escaped
 labels and is not published automatically.
 
