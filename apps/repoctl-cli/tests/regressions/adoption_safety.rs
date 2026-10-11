@@ -297,7 +297,7 @@ fn test_should_reject_oversized_saved_operation_lists_before_creating_files() ->
     fs::write(&plan_path, serde_json::to_vec(&data)?)?;
     let output = adoption_command(temp.path(), "apply", &plan_path)?;
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("adoption.limit.operations"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("adoption.plan.limit.operations"));
     assert!(!temp.path().join("apps/source").exists());
     Ok(())
 }

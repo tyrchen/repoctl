@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 144 regular tests and nine doctests. The separately
+The workspace suite contains 149 regular tests and nine doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -368,3 +368,36 @@ files pass without findings; all-source inspection retains 13 existing warnings.
 Dependencies, packaging, agent instructions and Buf execution are unchanged, so
 supply-chain, agent synchronization and local real-Buf gates were not repeated.
 Hosted Linux CI continues to exercise real Buf.
+
+
+## Project selection and saved-plan boundary review follow-up
+
+Five further findings are valid and fixed. Five tests in
+[project and plan regressions](../apps/repoctl-cli/tests/regressions/review_round_nine.rs) cover:
+
+- Disabled cache outputs remain source inputs. A related pre-fix test demonstrates
+  stale hits when an explicit input belongs to another enabled cache output; explicit
+  input matches now remain hashed in that case too. Changing those files misses and
+  updates actual restored output; unchanged content hits in both configurations.
+- The graph's project-scoped dependency model selects all sibling workspaces in
+  each affected project. A Node consumer of its same-project sibling gets checked
+  and enters CI when that sibling changes, without selecting an unrelated project.
+- Apply and verify use one bounded reader for saved plans. Sparse oversized input
+  fails the 64 MiB byte limit before parsing. Every top-level collection and example
+  nested source/inventory/argv collections reject excessive counts immediately.
+  Planning enforces the same limits and counts reviewed pretty JSON without an
+  additional serialized allocation. The old oversized-operation regression now
+  expects the earlier saved-plan boundary diagnostic.
+- README-only roots use the same detection predicate as child candidates. A
+  documentation tool plans, applies and verifies its README/spec files without
+  invented build tasks. Both project YAML suffixes are recognized as markers.
+- Document exclusions operate on repository-relative paths and reject non-UTF-8
+  document paths. Real checkouts below target/.git/node_modules/.repoctl ancestors
+  include permitted documents while still excluding secret-like project paths.
+
+Build, 149 regular tests, nine doctests, 149 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. Doctor and all nine changed
+Rust files pass without findings; all-source inspection retains 13 existing
+warnings. Dependencies, packaging, agent instructions and Buf execution are
+unchanged; unrelated supply-chain, agent synchronization and local real-Buf gates
+were not repeated. Hosted Linux CI continues to exercise real Buf.

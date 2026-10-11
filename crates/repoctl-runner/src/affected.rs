@@ -17,7 +17,6 @@ pub(super) fn compute_affected(
 ) -> AffectedReport {
     let mut direct = BTreeSet::new();
     let mut transitive = BTreeSet::new();
-    let mut direct_workspaces = BTreeSet::new();
     let mut reasons = Vec::new();
     let mut risk_flags = Vec::new();
     let mut reviewers = BTreeSet::new();
@@ -26,12 +25,6 @@ pub(super) fn compute_affected(
         if repo_wide_change(changed_file) {
             for project in &snapshot.projects {
                 direct.insert(project.name.clone());
-                direct_workspaces.extend(
-                    project
-                        .workspaces
-                        .iter()
-                        .map(|workspace| format!("{}:{}", project.name, workspace.name)),
-                );
                 reasons.push(reason(changed_file, &project.name, "repo-wide change"));
             }
             continue;
@@ -47,7 +40,6 @@ pub(super) fn compute_affected(
             if project.contains_path(changed_file) {
                 owned = true;
                 direct.insert(project.name.clone());
-                collect_matching_workspaces(project, changed_file, &mut direct_workspaces);
                 reasons.push(reason(changed_file, &project.name, "project file changed"));
                 reviewers.extend(project.owners.iter().cloned());
             }
@@ -80,7 +72,7 @@ pub(super) fn compute_affected(
             reviewers.extend(project.owners.iter().cloned());
         }
     }
-    let workspaces = affected_workspaces(snapshot, &all_projects, &direct_workspaces);
+    let workspaces = affected_workspaces(snapshot, &all_projects);
     let tasks = affected_tasks(snapshot, &all_projects, &workspaces, requested_tasks);
     AffectedReport {
         directly_affected: direct.into_iter().collect(),
@@ -211,50 +203,15 @@ fn project_from_node(node: &str) -> Option<String> {
     node.strip_prefix("project:").map(ToString::to_string)
 }
 
-fn collect_matching_workspaces(
-    project: &ProjectManifest,
-    changed_file: &RepoRelativePath,
-    direct_workspaces: &mut BTreeSet<String>,
-) {
-    let mut matched = false;
-    for workspace in &project.workspaces {
-        if project
-            .path
-            .join_project(&workspace.root)
-            .is_ok_and(|root| changed_file.starts_with(&root))
-        {
-            direct_workspaces.insert(format!("{}:{}", project.name, workspace.name));
-            matched = true;
-        }
-    }
-    if !matched {
-        for workspace in &project.workspaces {
-            direct_workspaces.insert(format!("{}:{}", project.name, workspace.name));
-        }
-    }
-}
-
-fn affected_workspaces(
-    snapshot: &RepoSnapshot,
-    projects: &BTreeSet<ProjectName>,
-    direct_workspaces: &BTreeSet<String>,
-) -> Vec<String> {
+fn affected_workspaces(snapshot: &RepoSnapshot, projects: &BTreeSet<ProjectName>) -> Vec<String> {
     let mut workspaces = Vec::new();
     for project in &snapshot.projects {
         if !projects.contains(&project.name) {
             continue;
         }
+        // Dependency edges are project-scoped, so retain intra-project consumers.
         for workspace in &project.workspaces {
-            let id = format!("{}:{}", project.name, workspace.name);
-            let has_specific_workspaces = direct_workspaces
-                .iter()
-                .any(|workspace| workspace.starts_with(&format!("{}:", project.name)));
-            if direct_workspaces.is_empty()
-                || direct_workspaces.contains(&id)
-                || !has_specific_workspaces
-            {
-                workspaces.push(id);
-            }
+            workspaces.push(format!("{}:{}", project.name, workspace.name));
         }
     }
     workspaces

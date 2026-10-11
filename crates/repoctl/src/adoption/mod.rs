@@ -19,6 +19,7 @@ mod lockfiles;
 mod node;
 mod packages;
 mod placement;
+mod plan_io;
 mod rewrites;
 mod rust;
 mod source_walk;
@@ -29,6 +30,7 @@ use files::copy_operations_for_source;
 use inventory::{inventory_source, source_name, source_repositories};
 use packages::build_adopted_package_index;
 use placement::{PlacementDecision, infer_placement};
+pub(super) use plan_io::read_adoption_plan;
 use rewrites::{apply_rewrites_to_operations, plan_dependency_rewrites};
 use source_walk::{MAX_FILES, SourceBudgets, limit};
 use synthesis::{project_name_for_destination, synthesize_project_manifest};
@@ -70,20 +72,6 @@ fn canonical_root(path: &Path) -> Result<Utf8PathBuf, RepoctlError> {
             "path.non_utf8",
             format!("path is not valid UTF-8: {}", path.display()),
         ))
-    })
-}
-
-pub(super) fn read_adoption_plan(path: &Path) -> Result<AdoptionPlan, RepoctlError> {
-    let bytes =
-        fs::read(path).map_err(|source| RepoctlError::io(path.display().to_string(), source))?;
-    serde_json::from_slice(&bytes).map_err(|source| {
-        RepoctlError::diagnostic(
-            Diagnostic::error(
-                "adoption.plan.json",
-                format!("failed to parse plan JSON: {source}"),
-            )
-            .with_path(path.display().to_string()),
-        )
     })
 }
 
@@ -175,6 +163,7 @@ pub(super) fn plan_adoption(
         verification,
         diagnostics: source_plan.diagnostics,
     };
+    plan_io::validate_plan_limits(&plan)?;
     files::validate_operation_paths(&plan)?;
     Ok(plan)
 }

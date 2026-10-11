@@ -15,12 +15,7 @@ pub(super) fn source_repositories(
     source_root: &Utf8Path,
     dest_root: &Utf8Path,
 ) -> Result<Vec<Utf8PathBuf>, RepoctlError> {
-    if source_root.join("Cargo.toml").is_file()
-        || source_root.join("pyproject.toml").is_file()
-        || source_root.join("package.json").is_file()
-        || source_root.join("project.yaml").is_file()
-        || source_root.join("Pulumi.yaml").is_file()
-    {
+    if is_repository(source_root) {
         return Ok(vec![source_root.to_path_buf()]);
     }
     let mut repos = Vec::new();
@@ -45,14 +40,7 @@ pub(super) fn source_repositories(
                 format!("adoption source contains a symlink: {path}"),
             )));
         }
-        if path.is_dir()
-            && (path.join("Cargo.toml").is_file()
-                || path.join("pyproject.toml").is_file()
-                || path.join("package.json").is_file()
-                || path.join("project.yaml").is_file()
-                || path.join("Pulumi.yaml").is_file()
-                || path.join("README.md").is_file())
-        {
+        if path.is_dir() && is_repository(&path) {
             if repos.len() >= MAX_SOURCES {
                 return Err(limit("sources", &path));
             }
@@ -61,6 +49,20 @@ pub(super) fn source_repositories(
     }
     repos.sort();
     Ok(repos)
+}
+
+fn is_repository(path: &Utf8Path) -> bool {
+    [
+        "Cargo.toml",
+        "pyproject.toml",
+        "package.json",
+        "project.yaml",
+        "project.yml",
+        "Pulumi.yaml",
+        "README.md",
+    ]
+    .iter()
+    .any(|marker| path.join(marker).is_file())
 }
 
 pub(super) fn source_name(path: &Utf8Path) -> Result<String, RepoctlError> {

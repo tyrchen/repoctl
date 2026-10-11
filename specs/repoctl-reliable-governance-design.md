@@ -103,6 +103,11 @@ dependency hashing is intentional; fine-grained named inputs can be added later.
 Input discovery caps all visited entries, including unmatched files and empty
 directories, at 100,000 and depth at 64. Selected inputs are capped at 20,000 files.
 Root Cargo configuration and task-routing files participate in fingerprints.
+Only enabled cache contracts contribute generated-output exclusions. Outputs from
+disabled caches remain normal source inputs and invalidate consuming tasks.
+Explicit input matches remain hashed even inside another task's enabled output
+tree. Implicit dependency-closure scans still omit generated outputs, with declared
+prerequisite/command artifact fingerprints protecting downstream cache validity.
 
 Sequential commands within one task feed their successful artifact fingerprints
 into the cache keys of every subsequent command in order. Missing fingerprints
@@ -143,6 +148,9 @@ Reverse traversal uses a queue and all project dependency surfaces. Reviewers co
 from the union of directly/transitively affected projects; risk
 flags identify changed shared-infrastructure and production-IaC paths. Unowned
 changed files produce a diagnostic instead of silently hiding a selection gap.
+Dependency edges are project-scoped. Select every workspace in a directly or
+transitively affected project, preserving intra-project consumers as well as
+cross-project consumers. Explicit task/workspace selectors can scope manual runs.
 
 Git uses argv, `--` separators and object-id resolution to prevent option confusion.
 Rename decoding selects both old and new ownership. Committed comparison is
@@ -248,6 +256,17 @@ stage's budgets shared across all selected sources: at most 20,000 files,
 64 MiB in aggregate. Exceeding a budget produces an `adoption.limit.*` error
 before filesystem mutation; excluded sources are not deeply inventoried.
 
+Single-source and child-candidate detection share the same repository markers,
+including `README.md` and both project YAML suffixes. README-only documentation
+tools receive source copies and metadata without fabricated build tasks.
+Saved plans are limited to 64 MiB of input and reviewed pretty JSON. Apply and
+verify share a bounded reader and validate all plan collections immediately after
+deserialization, before discovering the destination or mutating files. Sources and
+syntheses are capped at 256, operations/rewrites/refreshes/commands/diagnostics at
+20,000, CI operations at one, and prerequisites at 256. Nested inventory, reason,
+dependency-table, argv/environment/prerequisite and cache collections also have
+explicit limits. Planning enforces the same limits with a counting JSON writer.
+
 Recognize legacy binary `bun.lockb` as a Bun lock owner and copy it byte-for-byte
 when dependencies are unchanged. Automatic dependency rewrites omit the stale
 binary lock, explicitly request `bun install --lockfile-only --ignore-scripts
@@ -277,6 +296,8 @@ generated, binary, secret-like and symlink paths. Documentation inclusion uses
 declared files or directories, at most 512 total selected files, 4096 visited entries
 across all declared roots (including empty or excluded entries), and 32 directory
 levels. Enumeration stops at the shared entry budget before filtering paths.
+Documentation exclusions use repository-relative paths; ancestor checkout names
+cannot suppress otherwise permitted project documents.
 Budget is UTF-8 bytes (default 64 KiB, max 1 MiB), not a model-specific
 token estimate. Include each snippet's repo path/hash/truncation and reasons for
 omissions, and bound serialized enriched output including metadata. Reject a budget

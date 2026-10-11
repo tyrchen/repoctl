@@ -67,6 +67,7 @@ pub(super) fn fingerprint(
         .projects
         .iter()
         .flat_map(|p| p.tasks.values().flatten())
+        .filter(|task| task.execution.cache.enabled)
         .flat_map(|t| &t.execution.cache.outputs)
         .collect::<Vec<_>>();
     let root = snapshot.root.absolute.as_std_path();
@@ -121,7 +122,9 @@ fn collect_files(
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
-        if outputs.iter().any(|output| relative.starts_with(output)) {
+        if !inputs.is_match(relative.as_str())
+            && outputs.iter().any(|output| relative.starts_with(output))
+        {
             continue;
         }
         if inputs.is_match(relative.as_str())

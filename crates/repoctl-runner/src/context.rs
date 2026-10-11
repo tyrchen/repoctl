@@ -163,7 +163,7 @@ fn collect_documents(
     paths: &mut BTreeSet<RepoRelativePath>,
     visited: &mut usize,
 ) -> Result<(), RepoctlError> {
-    if excluded(directory.to_string_lossy().as_ref()) {
+    if excluded(relative_document_path(root, directory)?.as_str()) {
         return Ok(());
     }
     let mut pending = vec![(directory.to_path_buf(), 0_usize)];
@@ -175,7 +175,8 @@ fn collect_documents(
             let entry =
                 entry.map_err(|error| RepoctlError::io(directory.display().to_string(), error))?;
             let path = entry.path();
-            if excluded(path.to_string_lossy().as_ref()) {
+            let relative = relative_document_path(root, &path)?;
+            if excluded(relative.as_str()) {
                 continue;
             }
             let kind = entry
@@ -184,18 +185,22 @@ fn collect_documents(
             if kind.is_dir() && depth < 31 {
                 pending.push((path, depth.saturating_add(1)));
             } else if kind.is_file() || kind.is_symlink() {
-                let relative = path
-                    .strip_prefix(root)
-                    .map_err(|error| RepoctlError::Environment(error.to_string()))?;
-                paths.insert(
-                    RepoRelativePath::new(relative.to_string_lossy().replace('\\', "/"))
-                        .map_err(RepoctlError::diagnostic)?,
-                );
+                paths.insert(relative);
                 validate_selection(paths)?;
             }
         }
     }
     Ok(())
+}
+
+fn relative_document_path(root: &Path, path: &Path) -> Result<RepoRelativePath, RepoctlError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|error| RepoctlError::Environment(error.to_string()))?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| RepoctlError::Environment("documentation path is not UTF-8".to_string()))?;
+    RepoRelativePath::new(relative.replace('\\', "/")).map_err(RepoctlError::diagnostic)
 }
 
 fn visit_document_entry(visited: &mut usize) -> Result<(), RepoctlError> {

@@ -20,6 +20,8 @@ selection includes staged, unstaged, deleted and untracked paths. Renames select
 both source and destination owners. Impact follows project dependencies, including
 infrastructure and internal surfaces; reasons carry edge evidence and reviewers
 include transitive owners. Unowned changes emit a warning.
+Selection includes every workspace in each affected project, preserving consumers
+of sibling workspaces under the project-scoped dependency model.
 
 Tasks run only when every prerequisite succeeds. Multiple commands for the same
 project/workspace/task execute sequentially, in manifest order. Independent ready
@@ -75,6 +77,9 @@ Missing declared outputs or cache I/O failures fail the task. No remote cache or
 daemon is included. Put `.repoctl/cache/` in the managed repository's `.gitignore`.
 Input scanning stops at 100,000 visited entries, 64 levels or 20,000 selected files;
 unrelated files and empty directories count toward the traversal limit.
+Only enabled cache output declarations exclude generated files from source hashing;
+disabled cache outputs remain inputs.
+Explicit inputs inside other tasks' enabled output trees are also hashed.
 
 ```bash
 repoctl run build --no-cache
@@ -147,7 +152,8 @@ At most 256 explicit changed files and 512 total selected files are supported;
 documentation walking is limited to 32 directory levels and 4096 visited entries
 across all declared roots, including empty directories and excluded entries. A budget too small for
 mandatory metadata is an error. Mermaid output uses deterministic IDs and escaped
-labels and is not published automatically.
+labels and is not published automatically. Documentation exclusions use repository
+relative paths, so checkout ancestor names do not hide permitted documents.
 
 ## Adoption and Rust callers
 
@@ -188,6 +194,10 @@ Source-backed operations record BLAKE3 digests of original bytes, including bina
 files and rewritten manifests. Apply verifies all digests before writing; changed,
 missing or unreadable sources fail preflight. Regenerate old plans without digests.
 Streaming source hashing is capped at 256 MiB per file and 1 GiB total.
+Saved plans are capped at 64 MiB before parsing. Apply and verify validate all
+collection limits at the same boundary; generated plans meet that size limit too.
+A README-only source root is recognized directly and can be mapped to a
+documentation tool without inventing build tasks.
 Saved `--ci report-only` plans retain a workflow preview without writing it during
 apply; use `--ci update` to write the generated workflow.
 Legacy `bun.lockb` selects Bun and is preserved as binary data. When dependencies
