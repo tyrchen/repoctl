@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_types)]
 
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{self, Write as _},
@@ -11,11 +12,12 @@ use std::{
 
 use camino::Utf8Path;
 use repoctl_core::{
-    AdoptionFileOperation, AdoptionPlan, Diagnostic, RepoRelativePath, RepoctlError, Severity,
+    AdoptionFileOperation, AdoptionPlan, Diagnostic, DiscoverRequest, RepoRelativePath,
+    RepoctlError, Severity, YamlManifestParser,
 };
 
-use super::source_walk::{MAX_FILES, ScanBudget, SourceEntryKind, limit, walk_source};
-use crate::write_utf8_file;
+use super::source_walk::{MAX_FILES, ScanBudget, SourceEntryKind, limit, read_text, walk_source};
+use crate::{structural_discovery, write_utf8_file};
 
 pub(crate) fn apply_adoption_plan(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
     validate_operation_paths(plan)?;
@@ -108,6 +110,48 @@ pub(super) fn validate_operation_paths(plan: &AdoptionPlan) -> Result<(), Repoct
         validate_destination(plan, &operation.path)?;
         if !destinations.insert(operation.path.clone()) {
             return Err(conflict(&operation.path));
+        }
+    }
+    validate_project_identities(plan)
+}
+
+fn validate_project_identities(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
+    let snapshot = structural_discovery().discover(&DiscoverRequest {
+        repo: Some(plan.dest_root.as_std_path().to_path_buf()),
+    })?;
+    let mut names = snapshot
+        .projects
+        .iter()
+        .map(|project| project.name.clone())
+        .collect::<BTreeSet<_>>();
+    for operation in &plan.operations {
+        if !matches!(
+            Utf8Path::new(operation.destination_path.as_str()).file_name(),
+            Some("project.yaml" | "project.yml")
+        ) {
+            continue;
+        }
+        let content = if let Some(content) = &operation.content {
+            Cow::Borrowed(content.as_str())
+        } else if let Some(source) = &operation.source_path {
+            Cow::Owned(read_text(source)?)
+        } else {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.manifest.content",
+                "project manifest operation requires content or a source file",
+            )));
+        };
+        let project = YamlManifestParser
+            .parse_project_bytes(operation.destination_path.as_str(), content.as_bytes())?;
+        if !names.insert(project.name.clone()) {
+            return Err(RepoctlError::diagnostic(
+                Diagnostic::error(
+                    "manifest.project.duplicate_name",
+                    format!("duplicate project name `{}`", project.name),
+                )
+                .with_path(operation.destination_path.as_str())
+                .with_project(project.name.as_str()),
+            ));
         }
     }
     Ok(())

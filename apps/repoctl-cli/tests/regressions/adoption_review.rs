@@ -180,16 +180,14 @@ fn test_should_reject_existing_and_duplicate_manifests_before_copying() -> TestR
     let temp = fixture()?;
     let source = temp.path().join("source");
     write(&source, "package.json", r#"{"name":"new-source"}"#)?;
-    write(
-        temp.path(),
-        "apps/existing/project.yaml",
-        "original manifest",
-    )?;
+    let original_manifest = "schema: company.project/v1\nname: apps.existing\nkind: app\npath: \
+                             apps/existing\nowners: ['@platform']\n";
+    write(temp.path(), "apps/existing/project.yaml", original_manifest)?;
     let output = plan(&source, temp.path(), &["--map", "source=apps/existing"])?;
     assert!(!output.status.success());
     assert_eq!(
         fs::read_to_string(temp.path().join("apps/existing/project.yaml"))?,
-        "original manifest"
+        original_manifest
     );
     assert!(!temp.path().join("apps/existing/package.json").exists());
     let output = plan(&source, temp.path(), &["--map", "source=apps/new"])?;
@@ -241,7 +239,7 @@ fn test_should_reject_existing_and_duplicate_manifests_before_copying() -> TestR
     );
     assert_eq!(
         fs::read_to_string(temp.path().join("apps/existing/project.yaml"))?,
-        "original manifest"
+        original_manifest
     );
     assert!(!temp.path().join("apps/new/package.json").exists());
 

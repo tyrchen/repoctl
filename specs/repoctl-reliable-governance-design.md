@@ -101,6 +101,13 @@ Hash file paths as well as contents; additions/deletions invalidate the key. Exc
 declared output trees and heavy generated/cache directories. This conservative
 dependency hashing is intentional; fine-grained named inputs can be added later.
 
+Sequential commands within one task feed their successful artifact fingerprints
+into the cache keys of every subsequent command in order. Missing fingerprints
+from an uncached or otherwise ineligible earlier command bypass later caching;
+this propagates through both the command group and its descendant tasks. Explicit
+intermediate-file input patterns cannot substitute for this chain because declared
+outputs are excluded from source hashing.
+
 Storage: `.repoctl/cache/tasks/<hash>.json`; entries contain bounded output, artifact
 bytes and their digests, never environment values. Write through a unique temporary
 file and atomic rename. Entry size is capped at 64 MiB, with at most 4096 artifacts and 64 directory levels.
@@ -203,7 +210,9 @@ Yarn classic and modern refresh commands differ; lifecycle scripts are skipped.
 
 All adoption output paths are checked at both planning and apply time before any
 mutation. Existing project.yaml/project.yml, existing copied or rewritten files,
-and duplicate destinations are errors. Adoption writes and copies create new files
+and duplicate destinations are errors. Synthesized project identities are checked
+against existing destination metadata and one another during both planning and
+application, including when CI generation is disabled. Adoption writes and copies create new files
 exclusively. A deliberately regenerated CI workflow may replace its existing file.
 `--ci report-only` serializes a preview-only `report-file` operation; saving and
 applying the plan preserves both an existing workflow and its absence. Only

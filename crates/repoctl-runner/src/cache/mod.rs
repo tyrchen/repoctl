@@ -51,19 +51,25 @@ pub(super) fn run(
     command: &ProcessCommand,
     snapshot: &RepoSnapshot,
     no_cache: bool,
+    preceding_fingerprints: &[Option<String>],
 ) -> Result<ProcessOutput, RepoctlError> {
     if no_cache || !command.execution.cache.enabled {
         return runner.run(command);
     }
     validate_outputs(command, snapshot)?;
-    if command.prerequisite_fingerprints.len() != command.prerequisites.len() {
+    if command.prerequisite_fingerprints.len() != command.prerequisites.len()
+        || preceding_fingerprints.iter().any(Option::is_none)
+    {
         let mut output = runner.run(command)?;
         output.fingerprint = None;
-        output.cache_warning =
-            Some("cache bypassed: prerequisite task has no artifact-aware fingerprint".to_string());
+        output.cache_warning = Some(
+            "cache bypassed: prerequisite task or earlier command has no artifact-aware \
+             fingerprint"
+                .to_string(),
+        );
         return Ok(output);
     }
-    let key = fingerprint(runner, command, snapshot)?;
+    let key = fingerprint(runner, command, snapshot, preceding_fingerprints)?;
     let root = snapshot.root.absolute.as_std_path();
     let dir = root.join(".repoctl/cache/tasks");
     safe_path(root, &dir)?;

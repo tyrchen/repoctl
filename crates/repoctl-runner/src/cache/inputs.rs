@@ -17,6 +17,7 @@ pub(super) fn fingerprint(
     runner: &Arc<dyn ProcessRunner>,
     command: &ProcessCommand,
     snapshot: &RepoSnapshot,
+    preceding_fingerprints: &[Option<String>],
 ) -> Result<String, RepoctlError> {
     let mut hasher = Hasher::new();
     field(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
@@ -25,6 +26,11 @@ pub(super) fn fingerprint(
     field(
         &mut hasher,
         &serde_json::to_vec(command).map_err(|error| json_error(&error))?,
+    );
+    field(&mut hasher, b"preceding-command-artifacts");
+    field(
+        &mut hasher,
+        &serde_json::to_vec(preceding_fingerprints).map_err(|error| json_error(&error))?,
     );
     for name in command
         .execution

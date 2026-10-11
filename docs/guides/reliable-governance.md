@@ -85,6 +85,10 @@ Cached dependents require artifact-aware fingerprints from every prerequisite
 command. An uncached or partly cached prerequisite bypasses descendant caching
 with a warning; successful exit status and identical logs cannot prove unchanged artifacts.
 
+Sequential commands in one task include preceding artifact fingerprints in later
+cache keys. Earlier uncached commands bypass subsequent caching, just as uncached
+prerequisite tasks do.
+
 ## Buf compatibility
 
 Keep lint/breaking policies in `buf.yaml` at the configured proto root. repoctl
@@ -167,7 +171,8 @@ Automatic Node rewrites omit stale locks and expose required `lockfileRefreshes`
 After `adopt apply`, run these commands in their declared directories, commit the
 regenerated locks, then run `adopt verify`; missing required locks fail verification.
 Apply executes file operations only. Planning and apply preflight reject existing
-project.yaml/project.yml, other file conflicts and duplicate output paths.
+project.yaml/project.yml, other file conflicts, duplicate output paths and duplicate
+project identities, including collisions with existing destination projects.
 A destination nested in the source is excluded from discovery and copying. Source
 and destination cannot be identical. Migration caps selected files/final operations
 at 20,000, entries at 100,000, candidates at 256 and depth at 64; inspected text is

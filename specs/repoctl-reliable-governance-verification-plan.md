@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 128 regular tests and eight doctests. The separately
+The workspace suite contains 130 regular tests and eight doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -252,3 +252,29 @@ files pass size checks with zero findings; the all-source count remains 13 exist
 warnings. Dependencies, packaging, agent instructions and Buf execution did not
 change, so their unrelated heavyweight gates were not repeated. Hosted Linux CI
 continues to exercise real Buf.
+
+
+## Sequential cache and project identity review follow-up
+
+Two further findings are valid and fixed. Two end-to-end tests in
+[sequential cache and identities](../apps/repoctl-cli/tests/regressions/review_round_five.rs) cover:
+
+- Three sequential commands in one task with explicitly declared intermediate
+  inputs. Environment and runtime changes declared only by the generator invalidate
+  both later cache entries; unchanged runs hit all three. An uncached generator
+  causes both later commands to bypass caching with warnings. Final artifacts are
+  checked after every run. Cache keys include ordered preceding artifact fingerprints
+  with a distinct format marker, so unsafe older keys cannot be reused.
+- Two sources mapped to different paths with the same synthesized project identity
+  fail planning even with CI disabled. An existing destination identity also fails;
+  a collision introduced after saving a plan fails application before any copy.
+  Preflight parses actual project file operations rather than trusting synthesis
+  report metadata. The older overwrite regression now uses a valid existing project
+  fixture, retaining its original-content assertions.
+
+Build, 130 workspace tests, eight doctests, 130 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. Doctor and all seven changed
+Rust files pass size checks with zero findings. The all-source scan retains 13
+existing warnings. Dependencies, packaging, agent instructions and Buf execution
+are unchanged; their unrelated heavyweight gates were not repeated. Hosted Linux
+CI continues to exercise real Buf.

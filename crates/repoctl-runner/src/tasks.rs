@@ -179,10 +179,17 @@ fn execute_group(
 ) -> (bool, GroupOutputs) {
     let mut outputs = Vec::new();
     let mut success = true;
+    let mut preceding_fingerprints = Vec::with_capacity(group.len());
     for (index, command) in group {
         let output = if success {
             match catch_unwind(AssertUnwindSafe(|| {
-                cache::run(runner, &command, snapshot, no_cache)
+                cache::run(
+                    runner,
+                    &command,
+                    snapshot,
+                    no_cache,
+                    &preceding_fingerprints,
+                )
             })) {
                 Ok(Ok(output)) => output,
                 Ok(Err(error)) => failed(126, &error.to_string()),
@@ -192,6 +199,7 @@ fn execute_group(
             failed(125, "skipped: an earlier command in this task failed")
         };
         success &= output.status == 0;
+        preceding_fingerprints.push(output.fingerprint.clone());
         outputs.push((index, command, output));
     }
     (success, outputs)
