@@ -20,6 +20,8 @@ selection includes staged, unstaged, deleted and untracked paths. Renames select
 both source and destination owners. Impact follows project dependencies, including
 infrastructure and internal surfaces; reasons carry edge evidence and reviewers
 include transitive owners. Unowned changes emit a warning.
+Local package/path dependencies use their deepest matching project owner and its
+public/internal policy, even when an enclosing project is declared.
 Selection includes every workspace in each affected project, preserving consumers
 of sibling workspaces under the project-scoped dependency model.
 
@@ -166,7 +168,7 @@ Python compile checks. Python dependency-source rewriting is not included.
 Cargo virtual workspaces expand explicit/globbed members and excludes offline,
 including inherited, target-specific and implicit member path dependencies. Ordinary
 Cargo packages also expose dependencies of project-local path packages. Pinned root
-toolchain, `.cargo/config.toml`/`.cargo/config` and root Make/Just/Task routing changes select every workspace. Adoption
+toolchain, `.cargo/config.toml`/`.cargo/config`, `pnpm-workspace.yaml` and root Make/Just/Task routing changes select every workspace. Adoption
 groups Cargo members under their actual workspace root and shared lockfile, emits
 `--workspace` tasks and verifies each owning root once. Independent nested packages
 remain separate, and workspace names are unique across all languages.

@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 149 regular tests and nine doctests. The separately
+The workspace suite contains 150 regular tests and nine doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -397,6 +397,33 @@ Five further findings are valid and fixed. Five tests in
 
 Build, 149 regular tests, nine doctests, 149 nextest cases, nightly formatting,
 strict pedantic clippy and API documentation pass. Doctor and all nine changed
+Rust files pass without findings; all-source inspection retains 13 existing
+warnings. Dependencies, packaging, agent instructions and Buf execution are
+unchanged; unrelated supply-chain, agent synchronization and local real-Buf gates
+were not repeated. Hosted Linux CI continues to exercise real Buf.
+
+
+## pnpm configuration and nested ownership review follow-up
+
+Two further findings are valid and fixed:
+
+- Root `pnpm-workspace.yaml` selects all affected projects/tasks and CI rows and
+  participates in cache fingerprints, following the
+  [pnpm workspace-root contract](https://pnpm.io/workspaces/). Existing
+  [root selection](../apps/repoctl-cli/tests/regressions/review_round_six.rs) and
+  [configuration fingerprint](../apps/repoctl-cli/tests/regressions/review_round_seven.rs)
+  cases cover selection, successful repeat hits and misses after configuration edits.
+- The common path classifier chooses the most specific project owner before
+  applying that project's public/internal areas or excluding same-project edges.
+  [Nested ownership](../apps/repoctl-cli/tests/regressions/review_round_ten.rs) covers
+  Node and Python package names and explicit local paths plus Rust paths. An outer
+  project whose name sorts first cannot capture its nested project's dependency.
+  A nested private package no longer inherits the outer public area; graph policy
+  correctly rejects app access. Same-project helper dependencies do not create
+  spurious edges to the outer project.
+
+Build, 150 regular tests, nine doctests, 150 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. Doctor and all seven changed
 Rust files pass without findings; all-source inspection retains 13 existing
 warnings. Dependencies, packaging, agent instructions and Buf execution are
 unchanged; unrelated supply-chain, agent synchronization and local real-Buf gates

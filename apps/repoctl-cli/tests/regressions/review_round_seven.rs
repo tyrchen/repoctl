@@ -320,7 +320,7 @@ fn test_should_reject_invalid_unlocked_package_manager_declarations() -> TestRes
 }
 
 #[test]
-fn test_should_invalidate_cache_when_root_cargo_configuration_changes() -> TestResult {
+fn test_should_invalidate_cache_when_root_workspace_configuration_changes() -> TestResult {
     let temp = fixture()?;
     app(temp.path(), "tasks:\n  build:\n    - workspace: api\n      command: python3 build.py\n      cache:\n        enabled: true\n        inputs: [apps/catalog/src/**]\n        outputs: [apps/catalog/out]\n")?;
     write(temp.path(), "apps/catalog/src/input", "input")?;
@@ -330,8 +330,20 @@ fn test_should_invalidate_cache_when_root_cargo_configuration_changes() -> TestR
         "import pathlib\np=pathlib.Path('out')\np.mkdir(exist_ok=True)\n(p/'result').write_text('\
          result')\n",
     )?;
-    for config in [".cargo/config.toml", ".cargo/config"] {
-        write(temp.path(), config, "[build]\njobs=1\n")?;
+    for (config, original, changed) in [
+        (
+            ".cargo/config.toml",
+            "[build]\njobs=1\n",
+            "[build]\njobs=2\n",
+        ),
+        (".cargo/config", "[build]\njobs=1\n", "[build]\njobs=2\n"),
+        (
+            "pnpm-workspace.yaml",
+            "packages: ['apps/*']\n",
+            "packages: ['apps/**']\n",
+        ),
+    ] {
+        write(temp.path(), config, original)?;
         assert_eq!(
             json(&cli(temp.path(), &["run", "build"])?)?["outputs"][0]["output"]["cached"],
             false
@@ -340,7 +352,7 @@ fn test_should_invalidate_cache_when_root_cargo_configuration_changes() -> TestR
             json(&cli(temp.path(), &["run", "build"])?)?["outputs"][0]["output"]["cached"],
             true
         );
-        write(temp.path(), config, "[build]\njobs=2\n")?;
+        write(temp.path(), config, changed)?;
         assert_eq!(
             json(&cli(temp.path(), &["run", "build"])?)?["outputs"][0]["output"]["cached"],
             false

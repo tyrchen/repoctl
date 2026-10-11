@@ -114,6 +114,7 @@ fn repo_wide_change(changed_file: &RepoRelativePath) -> bool {
                 | "package.json"
                 | "package-lock.json"
                 | "pnpm-lock.yaml"
+                | "pnpm-workspace.yaml"
                 | "bun.lock"
                 | "bun.lockb"
                 | "yarn.lock"

@@ -130,8 +130,11 @@ Local inspectors read bounded manifests and map dependency package names/paths t
 declared workspaces. Node handles dependencies/dev/peer/optional sections, workspace
 protocols and file/link paths. Python handles PEP 621 dependencies, optional groups,
 uv path sources and Poetry path dependencies; normalized distribution names are
-case-insensitive and treat dash/underscore/dot equally. Build package-name indexes
-and parsed Node/Python manifests once per graph construction; reuse them for all
+case-insensitive and treat dash/underscore/dot equally.
+Resolve package and local-path ownership to the deepest matching project path
+before classifying its public/internal surface or discarding a same-project edge.
+Build package indexes and parse Node/Python manifests once per graph construction;
+reuse them for all
 matching workspace inspections and discard them before the next construction.
 Cargo preserves the existing metadata inspector for explicit full verification and adds an offline TOML path
 inspector. Unknown external dependencies are not internal edges. Ambiguous local
@@ -208,7 +211,8 @@ dependencies actually referenced by packages. Root `rust-toolchain.toml` and leg
 changes are repo-wide inputs and select all workspaces even alongside narrower
 project changes. Root Makefile/GNUmakefile/cargo-make, Just and Task task-routing
 files likewise select the whole repository.
-Root `.cargo/config.toml` and legacy `.cargo/config` also select all workspaces.
+Root `.cargo/config.toml`, legacy `.cargo/config` and `pnpm-workspace.yaml` also
+select all workspaces and participate in cache fingerprints.
 
 Node package task workspaces retain their package roots while inheriting the nearest
 lockfile-owning directory's package manager and project-relative lockfile path.

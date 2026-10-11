@@ -29,6 +29,7 @@ fn test_should_select_all_projects_for_root_task_routing_changes() -> TestResult
         "Taskfile.yml",
         ".cargo/config.toml",
         ".cargo/config",
+        "pnpm-workspace.yaml",
     ] {
         let data = json(&cli(temp.path(), &["affected", "--changed-file", router])?)?;
         assert_eq!(data["directlyAffected"].as_array().map(Vec::len), Some(2));
