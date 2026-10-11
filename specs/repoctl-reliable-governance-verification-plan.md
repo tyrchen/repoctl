@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 125 regular tests and eight doctests. The separately
+The workspace suite contains 128 regular tests and eight doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -224,3 +224,31 @@ The all-source scan retains its 13 existing warnings; no thresholds were relaxed
 Dependencies, release packaging, agent instructions and Buf execution are unchanged,
 so audit/deny, agent sync and the separate local real-Buf gate were not repeated.
 Hosted CI continues to exercise real Buf.
+
+
+## Toolchain impact and polyglot Cargo review follow-up
+
+Four further findings are valid and fixed. Three end-to-end tests in
+[toolchain and polyglot review cases](../apps/repoctl-cli/tests/regressions/review_round_four.rs) cover:
+
+- Root `rust-toolchain.toml` and legacy `rust-toolchain` changes select every
+  workspace and task. Combining a root toolchain change with a narrower project
+  change still selects all CI matrix rows.
+- Ordinary Cargo package roots follow local path dependencies without requiring
+  `[workspace]`. Both child helpers and siblings of a nested Cargo entry point
+  expose cross-project edges, affected consumers and offline boundary violations.
+  Path-package recursion stays within the owning project, while protoc detection may
+  inspect the repository-local dependency closure; both retain package/file bounds.
+- Polyglot adoption emits workspaces and tasks for nested Cargo manifests and
+  verifies them in their manifest directories. Root/frontend Node packages,
+  multiple client packages and names colliding across Rust/Node/Python remain
+  distinct. Saved plans apply and structurally verify; the generated check matrix
+  includes all nine workspaces. The declared Cargo verification commands actually
+  run offline against two standalone nested Rust packages.
+
+Build, 128 workspace tests, eight doctests, 128 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. Doctor and all six changed Rust
+files pass size checks with zero findings; the all-source count remains 13 existing
+warnings. Dependencies, packaging, agent instructions and Buf execution did not
+change, so their unrelated heavyweight gates were not repeated. Hosted Linux CI
+continues to exercise real Buf.

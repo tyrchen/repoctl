@@ -175,6 +175,17 @@ manifest dependency, so a repository's dependency union cannot rewrite unrelated
 tables. Python migration remains copying/manifests; Python source rewriting is not
 claimed by adoption. Build generated CI from the post-adoption manifests, not the
 pre-adoption empty destination graph.
+Emit a Rust task workspace for every inventoried Cargo manifest, including nested
+standalone packages in polyglot sources; bind tasks and full-verification commands
+to each manifest's directory. Generated workspace names are deterministic and
+unique across all languages, with valid bounded names and stable collision suffixes.
+
+
+Cargo dependency discovery follows project-local path packages from ordinary
+package roots as well as virtual workspaces, including sibling packages outside a
+nested manifest directory. Root `rust-toolchain.toml` and legacy `rust-toolchain`
+changes are repo-wide inputs and select all workspaces even alongside narrower
+project changes.
 
 Node package task workspaces retain their package roots while inheriting the nearest
 lockfile-owning directory's package manager and project-relative lockfile path.

@@ -98,6 +98,8 @@ repoctl affected --changed-file frameworks/ui/src/index.ts --diagram mermaid
 迁移覆盖通用 Cargo/Node 包，保留 Cargo 别名、features、optional、default-features 和 target
 配置；重名包及无法解析的 workspace 继承会失败。归类依据内容或 `--map`，任务依据实际
 workspace、Node scripts/TypeScript 配置及 Python 编译检查生成。Python 依赖源重写不在本版本内。
+混合仓库中的嵌套 Cargo 包也会生成任务，工作区名称在所有语言间保持唯一。
+普通 Cargo 包的项目内路径依赖会继续向下发现；根目录 Rust 工具链变更会选中全部工作区。
 Node 子包保留独立任务，并继承最近的锁文件及包管理器，CI 在锁文件所属目录安装依赖。
 没有锁文件时不会生成虚假的锁文件声明。
 Python 子包同样继承最近的 `uv.lock`，安装在锁文件所属目录执行 `uv sync --frozen`。

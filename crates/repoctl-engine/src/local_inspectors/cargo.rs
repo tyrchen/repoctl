@@ -1,4 +1,4 @@
-//! Bounded offline traversal of Cargo members and implicit in-workspace path packages.
+//! Bounded offline traversal of Cargo members and project-local path packages.
 
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -77,6 +77,12 @@ pub(super) fn requires_protoc(
     Ok(required)
 }
 
+#[derive(Debug)]
+struct TraversalScope<'a> {
+    root: &'a Path,
+    exclusions: Option<(&'a GlobSet, &'a Path)>,
+}
+
 fn walk(
     input: &WorkspaceInspectionInput<'_>,
     manifest: &Path,
@@ -89,15 +95,14 @@ fn walk(
         .parent()
         .ok_or_else(|| manifest_error(manifest, "manifest has no parent"))?;
     let excluded = patterns(doc, "exclude", manifest)?;
-    let dependency_excludes = if follow_external_paths {
-        GlobSet::empty()
-    } else {
-        excluded.clone()
-    };
-    let dependency_root = if follow_external_paths {
-        input.root.absolute.as_std_path()
-    } else {
-        directory
+    let project_root = input.root.absolute.join(input.project.path.as_str());
+    let scope = TraversalScope {
+        root: if follow_external_paths {
+            input.root.absolute.as_std_path()
+        } else {
+            project_root.as_std_path()
+        },
+        exclusions: (!follow_external_paths).then_some((&excluded, directory)),
     };
     let mut queue = VecDeque::from([(manifest.to_path_buf(), doc.clone())]);
     for member in members(directory, manifest, doc, &excluded, input)? {
@@ -126,17 +131,7 @@ fn walk(
                 };
                 if let Some((origin, local)) = dependency {
                     on_dependency(&origin, &local, name)?;
-                    if follow_external_paths || doc.get("workspace").is_some() {
-                        enqueue_path_package(
-                            &origin,
-                            &local,
-                            dependency_root,
-                            &dependency_excludes,
-                            input,
-                            &visited,
-                            &mut queue,
-                        )?;
-                    }
+                    enqueue_path_package(&origin, &local, &scope, input, &visited, &mut queue)?;
                 }
             }
             Ok(())
@@ -148,8 +143,7 @@ fn walk(
 fn enqueue_path_package(
     origin: &Path,
     local: &str,
-    root: &Path,
-    excluded: &GlobSet,
+    scope: &TraversalScope<'_>,
     input: &WorkspaceInspectionInput<'_>,
     visited: &BTreeSet<PathBuf>,
     queue: &mut VecDeque<(PathBuf, DocumentMut)>,
@@ -164,11 +158,16 @@ fn enqueue_path_package(
     let candidate = candidate
         .canonicalize()
         .map_err(|error| RepoctlError::io(candidate.display().to_string(), error))?;
-    let Ok(relative) = candidate.strip_prefix(root) else {
+    if !candidate.starts_with(scope.root) {
         return Ok(());
-    };
+    }
+    let excluded = scope.exclusions.is_some_and(|(patterns, root)| {
+        candidate
+            .strip_prefix(root)
+            .is_ok_and(|relative| patterns.is_match(relative))
+    });
     let manifest = candidate.join("Cargo.toml");
-    if !excluded.is_match(relative)
+    if !excluded
         && !visited.contains(&manifest)
         && !queue.iter().any(|(queued, _)| queued == &manifest)
         && manifest.is_file()

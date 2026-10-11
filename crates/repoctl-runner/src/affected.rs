@@ -26,6 +26,12 @@ pub(super) fn compute_affected(
         if repo_wide_change(changed_file) {
             for project in &snapshot.projects {
                 direct.insert(project.name.clone());
+                direct_workspaces.extend(
+                    project
+                        .workspaces
+                        .iter()
+                        .map(|workspace| format!("{}:{}", project.name, workspace.name)),
+                );
                 reasons.push(reason(changed_file, &project.name, "repo-wide change"));
             }
             continue;
@@ -100,10 +106,13 @@ fn repo_wide_change(changed_file: &RepoRelativePath) -> bool {
                 | "CLAUDE.md"
                 | "Cargo.lock"
                 | "Cargo.toml"
+                | "rust-toolchain.toml"
+                | "rust-toolchain"
                 | "package.json"
                 | "package-lock.json"
                 | "pnpm-lock.yaml"
                 | "bun.lock"
+                | "bun.lockb"
                 | "yarn.lock"
                 | "uv.lock"
                 | "pyproject.toml"

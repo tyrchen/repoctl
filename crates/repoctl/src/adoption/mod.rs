@@ -375,19 +375,7 @@ fn adoption_verification_plan(
     }
     if mode == ValidationMode::Full {
         for source in sources.iter().filter(|source| !source.skipped) {
-            if source
-                .inventory
-                .manifests
-                .iter()
-                .any(|path| path.ends_with("Cargo.toml"))
-            {
-                commands.push(process_command(
-                    dest_root,
-                    &source.destination_path,
-                    "cargo",
-                    ["check", "--workspace", "--all-features"],
-                ));
-            }
+            synthesis::append_rust_verification(dest_root, source, &mut commands)?;
             synthesis::append_node_build_verification(dest_root, source, &mut commands)?;
         }
     }

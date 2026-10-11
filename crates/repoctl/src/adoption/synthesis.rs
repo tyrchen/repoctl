@@ -1,11 +1,14 @@
 //! Project manifests, workspace commands and infrastructure synthesis.
 
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 use camino::Utf8Path;
 use repoctl_core::{
     AdoptedSource, Diagnostic, OwnerHandle, ProcessCommand, ProjectKind, ProjectName,
-    ProjectRelativePath, RepoRelativePath, RepoctlError, SourceInventory,
+    ProjectRelativePath, RepoRelativePath, RepoctlError, SourceInventory, WorkspaceName,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -93,20 +96,28 @@ pub(super) fn project_name_for_destination(
 
 fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
     let mut workspaces = Vec::new();
-    if inventory.manifests.iter().any(|path| path == "Cargo.toml") {
-        let is_workspace = inventory
-            .manifests
-            .iter()
-            .any(|path| path.starts_with("crates/") || path.starts_with("apps/"));
-        let command = if is_workspace { "rust" } else { "service" };
+    let mut names = BTreeSet::new();
+    for manifest in inventory
+        .manifests
+        .iter()
+        .filter(|path| path.ends_with("Cargo.toml"))
+    {
+        let root = manifest.strip_suffix("/Cargo.toml").unwrap_or(".");
+        let base = if root == "." {
+            "rust".to_string()
+        } else {
+            format!("rust-{}", root.replace('/', "-"))
+        };
+        let name = unique_workspace_name(base, "rust", &mut names);
+        let lock = Utf8Path::new(manifest).with_file_name("Cargo.lock");
+        let lockfile = if inventory.manifests.iter().any(|path| path == lock.as_str()) {
+            format!("    lockfile: {lock}\n")
+        } else {
+            String::new()
+        };
         workspaces.push(format!(
-            "  - name: {command}\n    language: rust\n    toolchain: cargo\n    root: .\n    \
-             manifest: Cargo.toml\n{}    target_dir: \"{{repo_root}}/target/rust\"\n",
-            if inventory.manifests.iter().any(|path| path == "Cargo.lock") {
-                "    lockfile: Cargo.lock\n"
-            } else {
-                ""
-            },
+            "  - name: {name}\n    language: rust\n    toolchain: cargo\n    root: {root}\n    \
+             manifest: {manifest}\n{lockfile}    target_dir: \"{{repo_root}}/target/rust\"\n",
         ));
     }
     for manifest in inventory
@@ -116,7 +127,7 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
     {
         let root = manifest.strip_suffix("/package.json").unwrap_or(".");
         let root = if root.is_empty() { "." } else { root };
-        let name = node_workspace_name(root);
+        let name = unique_workspace_name(node_workspace_name(root), "node", &mut names);
         let install = node_install(inventory, root);
         let toolchain = install.toolchain;
         let cache_dir = install.cache_dir;
@@ -140,6 +151,7 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
         } else {
             format!("python-{}", root.replace('/', "-"))
         };
+        let name = unique_workspace_name(name, "python", &mut names);
         let lockfile = nearest_lockfile(inventory, root, &["uv.lock"])
             .map_or_else(String::new, |path| format!("    lockfile: {path}\n"));
         workspaces.push(format!(
@@ -148,10 +160,10 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
         ));
     }
     if inventory.manifests.iter().any(|path| path == "Pulumi.yaml") {
-        workspaces.push(
-            "  - name: infra\n    language: iac\n    root: .\n    manifest: Pulumi.yaml\n"
-                .to_string(),
-        );
+        let name = unique_workspace_name("infra".to_string(), "iac", &mut names);
+        workspaces.push(format!(
+            "  - name: {name}\n    language: iac\n    root: .\n    manifest: Pulumi.yaml\n"
+        ));
     }
     workspaces
 }
@@ -159,10 +171,26 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
 fn node_workspace_name(root: &str) -> String {
     match root {
         "infra" => "infra".to_string(),
-        "." | "frontend" => "frontend".to_string(),
+        "." => "node".to_string(),
+        "frontend" => "frontend".to_string(),
         value if value.contains("client") => "client-ts".to_string(),
         value => value.replace('/', "-"),
     }
+}
+
+fn unique_workspace_name(base: String, language: &str, names: &mut BTreeSet<String>) -> String {
+    let base = if base.len() <= 100 && WorkspaceName::new(&base).is_ok() {
+        base
+    } else {
+        language.to_string()
+    };
+    let mut name = base.clone();
+    let mut suffix = 2_usize;
+    while !names.insert(name.clone()) {
+        name = format!("{base}-{suffix}");
+        suffix = suffix.saturating_add(1);
+    }
+    name
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +307,32 @@ pub(super) fn append_node_build_verification(
                 ["run", "build"],
             ));
         }
+    }
+    Ok(())
+}
+
+pub(super) fn append_rust_verification(
+    destination: &Utf8Path,
+    source: &AdoptedSource,
+    commands: &mut Vec<ProcessCommand>,
+) -> Result<(), RepoctlError> {
+    for manifest in source
+        .inventory
+        .manifests
+        .iter()
+        .filter(|path| path.ends_with("Cargo.toml"))
+    {
+        let root = manifest.strip_suffix("/Cargo.toml").unwrap_or(".");
+        let cwd = source
+            .destination_path
+            .join_project(&ProjectRelativePath::new(root).map_err(RepoctlError::diagnostic)?)
+            .map_err(RepoctlError::diagnostic)?;
+        commands.push(process_command(
+            destination,
+            &cwd,
+            "cargo",
+            ["check", "--workspace", "--all-features"],
+        ));
     }
     Ok(())
 }

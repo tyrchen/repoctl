@@ -7,6 +7,7 @@ mod buf_contract;
 mod cache_dependencies;
 mod contracts;
 mod review;
+mod review_round_four;
 mod review_round_two;
 
 use std::{fs, process::Command};
