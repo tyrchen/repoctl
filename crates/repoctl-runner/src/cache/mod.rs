@@ -173,7 +173,9 @@ pub(super) fn validate_outputs(
             || output == &command.cwd
             || input_overlap
             || output.as_str().split('/').any(|part| {
-                matches!(part, ".git" | ".repoctl") || root_config(part) || part == "project.yaml"
+                matches!(part, ".git" | ".repoctl" | ".cargo")
+                    || root_config(part)
+                    || part == "project.yaml"
             })
             || configs.iter().any(|config| config.starts_with(output))
             || project.source.starts_with(output)
@@ -249,6 +251,18 @@ fn root_config(path: &str) -> bool {
             | "pyproject.toml"
             | "uv.lock"
             | "rust-toolchain.toml"
+            | "rust-toolchain"
+            | ".cargo/config.toml"
+            | ".cargo/config"
+            | "Makefile"
+            | "makefile"
+            | "GNUmakefile"
+            | "Makefile.toml"
+            | "Justfile"
+            | "justfile"
+            | ".justfile"
+            | "Taskfile.yaml"
+            | "Taskfile.yml"
     )
 }
 

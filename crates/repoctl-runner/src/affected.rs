@@ -106,6 +106,8 @@ fn repo_wide_change(changed_file: &RepoRelativePath) -> bool {
                 | "CLAUDE.md"
                 | "Cargo.lock"
                 | "Cargo.toml"
+                | ".cargo/config.toml"
+                | ".cargo/config"
                 | "Makefile"
                 | "makefile"
                 | "GNUmakefile"

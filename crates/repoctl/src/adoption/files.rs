@@ -8,6 +8,7 @@ use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{self, Write as _},
+    mem::take,
 };
 
 use camino::Utf8Path;
@@ -16,11 +17,15 @@ use repoctl_core::{
     RepoctlError, Severity, YamlManifestParser,
 };
 
-use super::source_walk::{MAX_FILES, ScanBudget, SourceEntryKind, limit, read_text, walk_source};
+use super::{
+    digests::{DigestBudget, validate_checksum},
+    source_walk::{MAX_FILES, ScanBudget, SourceEntryKind, limit, read_text, walk_source},
+};
 use crate::{structural_discovery, write_utf8_file};
 
 pub(crate) fn apply_adoption_plan(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
     validate_operation_paths(plan)?;
+    validate_source_digests(plan)?;
     let mut diagnostics = plan.diagnostics.clone();
     diagnostics.extend(plan.sources.iter().filter_map(|source| {
         if source.skipped || source.override_applied || source.confidence >= 0.75 {
@@ -157,6 +162,26 @@ fn validate_project_identities(plan: &AdoptionPlan) -> Result<(), RepoctlError> 
     Ok(())
 }
 
+fn validate_source_digests(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
+    let mut budget = DigestBudget::default();
+    for operation in &plan.operations {
+        if let Some(source) = &operation.source_path {
+            let expected = validate_checksum(operation.checksum.as_deref(), source)?;
+            if budget.digest(source)? != expected {
+                return Err(RepoctlError::diagnostic(
+                    Diagnostic::error(
+                        "adoption.copy.source_changed",
+                        "source bytes changed since planning; regenerate and review the adoption \
+                         plan",
+                    )
+                    .with_path(source.as_str()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn conflict(path: &RepoRelativePath) -> RepoctlError {
     RepoctlError::diagnostic(
         Diagnostic::error(
@@ -256,6 +281,7 @@ pub(super) fn copy_operations_for_source(
     budget: &mut ScanBudget,
 ) -> Result<Vec<AdoptionFileOperation>, RepoctlError> {
     let mut operations = Vec::new();
+    let mut digests = take(&mut budget.digests);
     walk_source(source_path, dest_root, budget, &mut |entry| {
         if entry.kind != SourceEntryKind::File
             || matches!(entry.path.file_name(), Some("project.yaml" | "project.yml"))
@@ -268,15 +294,17 @@ pub(super) fn copy_operations_for_source(
         if dest_root.join(destination_path.as_str()).exists() {
             return Err(conflict(&destination_path));
         }
+        let checksum = digests.digest(&entry.path)?;
         operations.push(AdoptionFileOperation {
             id: format!("adoption.copy.{destination_path}"),
             operation: "copy-file".to_string(),
             source_path: Some(entry.path),
             destination_path,
             content: None,
-            checksum: None,
+            checksum: Some(checksum),
         });
         Ok(())
     })?;
+    budget.digests = digests;
     Ok(operations)
 }

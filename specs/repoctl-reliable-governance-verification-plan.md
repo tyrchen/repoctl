@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 134 regular tests and nine doctests. The separately
+The workspace suite contains 143 regular tests and nine doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -310,3 +310,42 @@ files pass size checks with zero findings. All-source inspection retains its 13
 existing warnings. Dependencies, packaging, agent instructions and Buf execution
 are unchanged; their unrelated heavyweight gates were not repeated. Hosted Linux
 CI continues to exercise real Buf.
+
+
+## Source commitments and bounded configuration review follow-up
+
+Four further findings are valid and fixed. Five CLI tests in
+[source and manager regressions](../apps/repoctl-cli/tests/regressions/review_round_seven.rs),
+expanded [root selection coverage](../apps/repoctl-cli/tests/regressions/review_round_six.rs),
+and unit tests in [source hashing](../crates/repoctl/src/adoption/digests.rs),
+[Node ownership](../crates/repoctl/src/adoption/node.rs) and
+[cache scanning](../crates/repoctl-runner/src/cache/inputs.rs) cover:
+
+- Root `.cargo/config.toml` and legacy `.cargo/config` select all projects/tasks
+  and CI rows and invalidate previously successful cached commands.
+- Every source-backed operation commits original bytes with a BLAKE3 digest,
+  including binary files and rewritten manifests. Changed/deleted sources and old
+  plans without digests fail before creating any destination project or workflow.
+  Restoring the original bytes permits application and preserves binary content.
+  Streaming hashes cap files at 256 MiB and all sources at 1 GiB; unit tests cover
+  aggregate limits, sparse oversized files and invalid digest formats.
+- Unlocked packages select npm/pnpm/Yarn/Bun from the closest explicit declaration,
+  inherit ancestor declarations when absent, and keep local overrides. Tasks and
+  full verification use the selected executable. Actual isolated CI run-step
+  installation and script execution are checked for all four managers with argv
+  recording executables and no registry calls. Existing locks take priority;
+  unsupported, malformed or oversized declarations fail planning. See the
+  [Corepack package manager contract](https://github.com/nodejs/corepack/blob/main/README.md).
+- Cache scanning caps all visited entries at 100,000 and depth at 64, including
+  unmatched files and empty directories, alongside the existing 20,000 selected
+  file limit. Boundary tests use smaller scan budgets and actual unmatched trees.
+
+Build, 143 regular tests, nine doctests, 143 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. The facade reuses the existing
+workspace BLAKE3 dependency; no dependency version changed. Audit and deny were
+rerun because the facade manifest and lockfile dependency list changed. Doctor has
+no errors and retains only the existing `core/domain.rs` file-size warning (that
+file changes documentation only); the other 13 changed Rust files pass scoped size
+checks without findings. All-source inspection retains 13 existing warnings. Agent instructions, release packaging and Buf execution are
+unchanged, so agent synchronization and local real-Buf execution were not repeated.
+Hosted Linux CI continues to exercise real Buf.

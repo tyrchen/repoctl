@@ -73,6 +73,8 @@ not cached. Corrupt/incompatible entries produce a miss with a warning. Cache
 entries are local to `.repoctl/cache/tasks`, bounded to 64 MiB and 4096 artifacts and 64 directory levels.
 Missing declared outputs or cache I/O failures fail the task. No remote cache or
 daemon is included. Put `.repoctl/cache/` in the managed repository's `.gitignore`.
+Input scanning stops at 100,000 visited entries, 64 levels or 20,000 selected files;
+unrelated files and empty directories count toward the traversal limit.
 
 ```bash
 repoctl run build --no-cache
@@ -157,13 +159,15 @@ Python compile checks. Python dependency-source rewriting is not included.
 Cargo virtual workspaces expand explicit/globbed members and excludes offline,
 including inherited, target-specific and implicit member path dependencies. Ordinary
 Cargo packages also expose dependencies of project-local path packages. Pinned root
-toolchain and root Make/Just/Task routing changes select every workspace. Adoption
+toolchain, `.cargo/config.toml`/`.cargo/config` and root Make/Just/Task routing changes select every workspace. Adoption
 groups Cargo members under their actual workspace root and shared lockfile, emits
 `--workspace` tasks and verifies each owning root once. Independent nested packages
 remain separate, and workspace names are unique across all languages.
 Node child packages keep their scripts while inheriting the nearest lockfile owner
 and package manager; CI installs in the owner directory. Unlocked packages do not
 declare invented lockfiles.
+Without a lockfile, tasks, CI and full verification use the nearest declared
+`packageManager` (inherited from an ancestor when absent), then default to npm.
 Python packages inherit their nearest existing `uv.lock`, with frozen installation
 in its owner directory. Offline discovery includes Poetry development/test groups.
 CI protoc requirements include Cargo members, local path dependencies and active
@@ -179,6 +183,10 @@ A destination nested in the source is excluded from discovery and copying. Sourc
 and destination cannot be identical. Migration caps selected files/final operations
 at 20,000, entries at 100,000, candidates at 256 and depth at 64; inspected text is
 limited to 256 KiB per file and 64 MiB total. Oversized sources fail explicitly.
+Source-backed operations record BLAKE3 digests of original bytes, including binary
+files and rewritten manifests. Apply verifies all digests before writing; changed,
+missing or unreadable sources fail preflight. Regenerate old plans without digests.
+Streaming source hashing is capped at 256 MiB per file and 1 GiB total.
 Saved `--ci report-only` plans retain a workflow preview without writing it during
 apply; use `--ci update` to write the generated workflow.
 Legacy `bun.lockb` selects Bun and is preserved as binary data. When dependencies

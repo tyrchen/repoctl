@@ -100,6 +100,9 @@ dependency task results, selected environment values and runtime command outputs
 Hash file paths as well as contents; additions/deletions invalidate the key. Exclude
 declared output trees and heavy generated/cache directories. This conservative
 dependency hashing is intentional; fine-grained named inputs can be added later.
+Input discovery caps all visited entries, including unmatched files and empty
+directories, at 100,000 and depth at 64. Selected inputs are capped at 20,000 files.
+Root Cargo configuration and task-routing files participate in fingerprints.
 
 Sequential commands within one task feed their successful artifact fingerprints
 into the cache keys of every subsequent command in order. Missing fingerprints
@@ -197,9 +200,13 @@ dependencies actually referenced by packages. Root `rust-toolchain.toml` and leg
 changes are repo-wide inputs and select all workspaces even alongside narrower
 project changes. Root Makefile/GNUmakefile/cargo-make, Just and Task task-routing
 files likewise select the whole repository.
+Root `.cargo/config.toml` and legacy `.cargo/config` also select all workspaces.
 
 Node package task workspaces retain their package roots while inheriting the nearest
 lockfile-owning directory's package manager and project-relative lockfile path.
+Without a lockfile, use the nearest package manifest's `packageManager` declaration
+(inherit an ancestor declaration when absent), then default to npm. Reject malformed,
+unsupported or over-256-byte declarations. Existing lockfile ownership takes priority.
 Packages without a lockfile do not declare an invented one. CI installs from the
 owning directory and runs scripts from the package directory.
 Python packages likewise inherit their nearest existing `uv.lock`; pure Python
@@ -221,6 +228,13 @@ exclusively. A deliberately regenerated CI workflow may replace its existing fil
 `--ci report-only` serializes a preview-only `report-file` operation; saving and
 applying the plan preserves both an existing workflow and its absence. Only
 `--ci update` emits an applicable workflow write; `off` emits no CI operation.
+
+Every source-backed operation records the original byte digest as
+`blake3:<64 lowercase hex digits>`, including binary copies and rewritten manifests.
+Before any application write, reopen and hash every source and reject changed,
+missing, unreadable or unsigned sources. Old saved plans without source digests must
+be regenerated and reviewed. Hashing is streaming, capped at 256 MiB per file and
+1 GiB across all selected sources during copy planning and again during preflight.
 
 Canonicalize source and destination roots. Reject identical roots and prune a
 nested destination from candidate discovery, inventory, package indexing and copy

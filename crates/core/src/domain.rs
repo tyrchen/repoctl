@@ -2283,7 +2283,8 @@ pub struct AdoptionFileOperation {
     /// Optional UTF-8 replacement content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// File checksum when known.
+    /// Original source bytes as `blake3:<64 lowercase hex digits>`.
+    /// Required for source-backed operations, including rewritten manifests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
 }

@@ -12,6 +12,7 @@ use repoctl_core::{
 
 use super::Repoctl;
 
+mod digests;
 mod files;
 mod inventory;
 mod lockfiles;

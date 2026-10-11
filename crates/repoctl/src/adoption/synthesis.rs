@@ -128,7 +128,7 @@ fn synthesize_workspaces(
         let root = manifest.strip_suffix("/package.json").unwrap_or(".");
         let root = if root.is_empty() { "." } else { root };
         let name = unique_workspace_name(node_workspace_name(root), "node", &mut names);
-        let install = node_install(inventory, root);
+        let install = node_install(source, inventory, root)?;
         let toolchain = install.toolchain;
         let cache_dir = install.cache_dir;
         let lockfile = install
@@ -285,7 +285,7 @@ pub(super) fn append_node_build_verification(
         .filter(|path| path.ends_with("package.json"))
     {
         let root = manifest.strip_suffix("/package.json").unwrap_or(".");
-        let install = node_install(&source.inventory, root);
+        let install = node_install(&source.source_path, &source.inventory, root)?;
         let workspace = TaskWorkspace {
             name: node_workspace_name(root),
             language: "typescript".to_string(),

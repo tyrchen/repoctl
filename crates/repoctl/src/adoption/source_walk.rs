@@ -11,7 +11,7 @@ use std::{
 use camino::{Utf8Path, Utf8PathBuf};
 use repoctl_core::{Diagnostic, ProjectRelativePath, RepoctlError};
 
-use super::ADOPTION_EXCLUDED_DIRS;
+use super::{ADOPTION_EXCLUDED_DIRS, digests::DigestBudget};
 
 pub(super) const MAX_FILES: usize = 20_000;
 pub(super) const MAX_ENTRIES: usize = 100_000;
@@ -25,6 +25,7 @@ pub(super) struct ScanBudget {
     entries: usize,
     files: usize,
     text_bytes: u64,
+    pub digests: DigestBudget,
 }
 
 impl ScanBudget {

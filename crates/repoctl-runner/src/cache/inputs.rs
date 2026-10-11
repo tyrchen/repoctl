@@ -1,9 +1,9 @@
 //! Conservative cache keys including source closure, runtimes and environment.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use blake3::Hasher;
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use repoctl_core::{
     CommandSpec, ProcessCommand, ProcessRunner, RepoRelativePath, RepoSnapshot, RepoctlError,
@@ -12,6 +12,9 @@ use repoctl_core::{
 use super::{
     MAX_ENTRY_BYTES, bounded_read, field, heavy, json_error, relative, root_config, safe_path,
 };
+
+const MAX_VISITED_ENTRIES: usize = 100_000;
+const MAX_DEPTH: usize = 64;
 
 pub(super) fn fingerprint(
     runner: &Arc<dyn ProcessRunner>,
@@ -67,8 +70,26 @@ pub(super) fn fingerprint(
         .flat_map(|t| &t.execution.cache.outputs)
         .collect::<Vec<_>>();
     let root = snapshot.root.absolute.as_std_path();
+    let files = collect_files(root, &inputs, &roots, &outputs, MAX_VISITED_ENTRIES)?;
+    for path in files {
+        let absolute = root.join(path.as_str());
+        safe_path(root, &absolute)?;
+        let bytes = bounded_read(&absolute, MAX_ENTRY_BYTES)?;
+        field(&mut hasher, path.as_str().as_bytes());
+        field(&mut hasher, &bytes);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn collect_files(
+    root: &Path,
+    inputs: &GlobSet,
+    roots: &[RepoRelativePath],
+    outputs: &[&RepoRelativePath],
+    entry_limit: usize,
+) -> Result<BTreeSet<RepoRelativePath>, RepoctlError> {
     let mut files = BTreeSet::new();
-    for entry in WalkBuilder::new(root)
+    for (visited, entry) in WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
         .git_exclude(false)
@@ -77,8 +98,14 @@ pub(super) fn fingerprint(
         .parents(false)
         .filter_entry(|entry| !heavy(entry.file_name().to_string_lossy().as_ref()))
         .build()
+        .enumerate()
     {
         let entry = entry.map_err(|error| RepoctlError::Environment(error.to_string()))?;
+        if visited >= entry_limit || entry.depth() > MAX_DEPTH {
+            return Err(RepoctlError::Environment(format!(
+                "cache input traversal exceeds {entry_limit} entries or {MAX_DEPTH} levels"
+            )));
+        }
         if entry.path() == root {
             continue;
         }
@@ -109,14 +136,7 @@ pub(super) fn fingerprint(
             ));
         }
     }
-    for path in files {
-        let absolute = root.join(path.as_str());
-        safe_path(root, &absolute)?;
-        let bytes = bounded_read(&absolute, MAX_ENTRY_BYTES)?;
-        field(&mut hasher, path.as_str().as_bytes());
-        field(&mut hasher, &bytes);
-    }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(files)
 }
 
 fn hash_runtimes(
@@ -187,4 +207,44 @@ fn dependency_roots(command: &ProcessCommand, snapshot: &RepoSnapshot) -> Vec<Re
         .filter(|p| names.contains(p.name.as_str()))
         .map(|p| p.path.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{error::Error, fs};
+
+    use globset::GlobSet;
+
+    use super::{MAX_DEPTH, collect_files};
+
+    #[test]
+    fn test_should_cap_unmatched_files_and_empty_directories() -> Result<(), Box<dyn Error>> {
+        for directories in [false, true] {
+            let temp = tempfile::tempdir()?;
+            for index in 0..5 {
+                let path = temp.path().join(format!("unowned-{index}"));
+                if directories {
+                    fs::create_dir(path)?;
+                } else {
+                    fs::write(path, "unrelated")?;
+                }
+            }
+            let error = collect_files(temp.path(), &GlobSet::empty(), &[], &[], 4)
+                .expect_err("unmatched entries must count");
+            assert!(error.to_string().contains("4 entries"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_bound_unmatched_directory_depth() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut path = temp.path().to_path_buf();
+        for _ in 0..=MAX_DEPTH {
+            path.push("nested");
+            fs::create_dir(&path)?;
+        }
+        assert!(collect_files(temp.path(), &GlobSet::empty(), &[], &[], 1000).is_err());
+        Ok(())
+    }
 }

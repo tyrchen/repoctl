@@ -73,7 +73,7 @@ fn refresh_for_manifest(
         return Ok(None);
     }
     let root = manifest.strip_suffix("/package.json").unwrap_or(".");
-    let install = node_install(&source.inventory, root);
+    let install = node_install(&source.source_path, &source.inventory, root)?;
     let Some(lockfile) = install.lockfile else {
         return Ok(None);
     };
