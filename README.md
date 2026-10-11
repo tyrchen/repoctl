@@ -2,7 +2,7 @@
 
 `repoctl` is a graph-aware control plane for functional monorepos. It gives a repository one validated model for humans, CI, and AI agents to share: project boundaries, workspace discovery, dependency graph, affected tasks, CI matrices, PR impact, templates, proto ownership, IaC routing, operations planning, and agent context.
 
-The project is still early, but the core workflow is already present behind a typed Rust facade and a CLI named `repoctl`.
+The core workflow is available through a typed Rust facade and the `repoctl` CLI. [v0.7 governance](docs/guides/reliable-governance.md) adds offline Cargo/Node/Python discovery, dependency-aware execution, opt-in local caching, Buf compatibility checks and executable CI.
 
 ## Why repoctl exists
 

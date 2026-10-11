@@ -12,6 +12,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+toml_edit.workspace = true
 camino.workspace = true
 cargo_metadata.workspace = true
 globset.workspace = true

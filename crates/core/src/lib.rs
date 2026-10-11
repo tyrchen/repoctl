@@ -14,6 +14,7 @@
 
 pub mod diagnostic;
 pub mod domain;
+pub mod execution;
 pub mod manifest;
 pub mod ports;
 
@@ -53,6 +54,7 @@ pub use domain::{
     ToolPrerequisite, Toolchain, ValidationMode, VerificationPlan, Visibility, WorkspaceLanguage,
     WorkspaceName, WorkspaceSpec, utf8_path_buf, validate_project_convention,
 };
+pub use execution::{TaskCacheConfig, TaskExecutionOptions};
 pub use manifest::{ManifestSource, YamlManifestParser};
 pub use ports::{
     DiscoveredEdge, FixedRepoLocator, GraphBuildInput, GraphBuilder, InMemoryRepoFileSystem,

@@ -135,6 +135,9 @@ enum Command {
     },
     /// Compute affected projects and tasks.
     Affected {
+        /// Export the impact diagram.
+        #[arg(long, value_enum)]
+        diagram: Option<DiagramFormat>,
         /// Repository root or path inside the repo.
         #[arg(long)]
         repo: Option<PathBuf>,
@@ -156,6 +159,9 @@ enum Command {
     },
     /// Plan or run repository tasks.
     Run {
+        /// Bypass local task cache.
+        #[arg(long)]
+        no_cache: bool,
         /// Task name.
         task: String,
         /// Repository root or path inside the repo.
@@ -226,6 +232,15 @@ enum Command {
     },
     /// Build AI agent context.
     Context {
+        /// Explicit changed source file to include.
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        /// Include project-declared documentation.
+        #[arg(long)]
+        include_docs: bool,
+        /// Maximum serialized context bytes.
+        #[arg(long, default_value_t = 65_536)]
+        max_bytes: usize,
         /// Project id.
         project: String,
         /// Repository root or path inside the repo.
@@ -359,6 +374,9 @@ enum CiCommand {
     },
     /// Execute one CI matrix step locally.
     RunStep {
+        /// Install dependencies for the selected task closure.
+        #[arg(long)]
+        install: bool,
         /// Task name.
         #[arg(long)]
         task: String,
@@ -590,6 +608,12 @@ enum ProtoCommand {
     },
     /// Check proto toolchain and generated-code policy.
     Check {
+        /// Buf comparison source for breaking-change detection.
+        #[arg(long)]
+        against: Option<String>,
+        /// Execute Buf commands.
+        #[arg(long)]
+        execute: bool,
         /// Repository root or path inside the repo.
         #[arg(long)]
         repo: Option<PathBuf>,
@@ -872,6 +896,9 @@ enum GraphCommand {
     },
     /// Print the graph.
     Print {
+        /// Export the architecture diagram.
+        #[arg(long, value_enum)]
+        diagram: Option<DiagramFormat>,
         /// Repository root or path inside the repo.
         #[arg(long)]
         repo: Option<PathBuf>,
@@ -879,6 +906,11 @@ enum GraphCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum DiagramFormat {
+    Mermaid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -1052,9 +1084,17 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 render_validation_report(&report, format, "Graph validation passed.")?;
                 Ok(exit_for_diagnostics(&report.diagnostics))
             }
-            GraphCommand::Print { repo, format } => {
+            GraphCommand::Print {
+                repo,
+                format,
+                diagram,
+            } => {
                 let report = repoctl.graph_print(GraphPrintRequest { repo })?;
-                render_graph_print(&report, format)?;
+                if diagram.is_some() {
+                    write_stdout(&repoctl::graph_mermaid(&report.snapshot.graph))?;
+                } else {
+                    render_graph_print(&report, format)?;
+                }
                 Ok(ExitCode::SUCCESS)
             }
         },
@@ -1102,6 +1142,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
             Ok(exit_for_diagnostics(&validation.diagnostics))
         }
         Command::Affected {
+            diagram,
             repo,
             base,
             head,
@@ -1116,10 +1157,15 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 changed_files: parse_changed_files(changed_files)?,
                 tasks: parse_tasks(tasks)?,
             })?;
-            render_affected(&report, format)?;
+            if diagram.is_some() {
+                write_stdout(&repoctl::affected_mermaid(&report))?;
+            } else {
+                render_affected(&report, format)?;
+            }
             Ok(exit_for_diagnostics(&report.diagnostics))
         }
         Command::Run {
+            no_cache,
             task,
             repo,
             projects,
@@ -1133,6 +1179,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
             format,
         } => {
             let report = repoctl.run_task(TaskRunRequest {
+                no_cache,
                 repo,
                 tasks: vec![TaskName::new(task).map_err(RepoctlError::diagnostic)?],
                 projects: parse_projects(projects)?,
@@ -1183,6 +1230,7 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 Ok(ExitCode::SUCCESS)
             }
             CiCommand::RunStep {
+                install,
                 task,
                 project,
                 workspace,
@@ -1190,20 +1238,24 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 dry_run,
                 format,
             } => {
-                let report = repoctl.run_task(TaskRunRequest {
-                    repo,
-                    tasks: vec![TaskName::new(task).map_err(RepoctlError::diagnostic)?],
-                    projects: vec![
-                        ProjectName::new(project.clone()).map_err(RepoctlError::diagnostic)?,
-                    ],
-                    workspaces: vec![format!("{project}:{workspace}")],
-                    affected: false,
-                    changed_files: Vec::new(),
-                    base: None,
-                    head: None,
-                    concurrency: None,
-                    dry_run,
-                })?;
+                let report = repoctl.ci_run_step(
+                    TaskRunRequest {
+                        no_cache: false,
+                        repo,
+                        tasks: vec![TaskName::new(task).map_err(RepoctlError::diagnostic)?],
+                        projects: vec![
+                            ProjectName::new(project.clone()).map_err(RepoctlError::diagnostic)?,
+                        ],
+                        workspaces: vec![format!("{project}:{workspace}")],
+                        affected: false,
+                        changed_files: Vec::new(),
+                        base: None,
+                        head: None,
+                        concurrency: None,
+                        dry_run,
+                    },
+                    install,
+                )?;
                 render_task_report(&report, format)?;
                 Ok(exit_for_diagnostics(&report.diagnostics))
             }
@@ -1371,6 +1423,8 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 format,
             } => {
                 let report = repoctl.proto().owners(ProtoFacadeRequest {
+                    against: None,
+                    execute: false,
                     repo,
                     operation: ProtoOperation::Owners,
                     selector: Some(selector),
@@ -1387,6 +1441,8 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 format,
             } => {
                 let report = repoctl.proto().consumers(ProtoFacadeRequest {
+                    against: None,
+                    execute: false,
                     repo,
                     operation: ProtoOperation::Consumers,
                     selector: Some(selector),
@@ -1398,6 +1454,8 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 Ok(exit_for_diagnostics(&report.diagnostics))
             }
             ProtoCommand::Check {
+                against,
+                execute,
                 repo,
                 changed_files,
                 base,
@@ -1405,6 +1463,8 @@ fn run() -> Result<ExitCode, RepoctlError> {
                 format,
             } => {
                 let report = repoctl.proto().check(ProtoFacadeRequest {
+                    against,
+                    execute,
                     repo,
                     operation: ProtoOperation::Check,
                     selector: None,
@@ -1417,12 +1477,18 @@ fn run() -> Result<ExitCode, RepoctlError> {
             }
         },
         Command::Context {
+            changed_files,
+            include_docs,
+            max_bytes,
             project,
             repo,
             for_target,
             format,
         } => {
             let report = repoctl.ai_context(AiContextRequest {
+                changed_files: parse_changed_files(changed_files)?,
+                include_docs,
+                max_bytes,
                 repo,
                 project: ProjectName::new(project).map_err(RepoctlError::diagnostic)?,
                 audience: for_target,

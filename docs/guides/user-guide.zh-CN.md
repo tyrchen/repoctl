@@ -289,3 +289,7 @@ repoctl ci matrix --tasks check,test --format github-actions
 6. 用 `repoctl pr summary` 整理影响面。
 
 如果前面的图校验失败，先修图和清单。后面的 affected、CI、PR 摘要都依赖一张正确的项目图。
+
+## 可靠执行、缓存与 Buf 兼容性检查
+
+任务依赖、本地缓存、Buf breaking、真实 CI、上下文预算及 Mermaid 导出见[多语言仓库治理 v0.7](reliable-governance.zh-CN.md)。

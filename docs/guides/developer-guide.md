@@ -28,7 +28,7 @@ The CLI parses flags, calls the facade, renders reports, and maps diagnostics to
 The project uses Rust 2024 and pins the stable toolchain in `rust-toolchain.toml`.
 
 ```bash
-rustup toolchain install 1.96.0
+rustup toolchain install 1.99.0
 cargo --version
 ```
 

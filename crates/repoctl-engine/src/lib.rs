@@ -6,14 +6,24 @@
 
 //! Discovery, graph construction, and policy evaluation for repoctl.
 
+use std::sync::Arc;
+
+use repoctl_core::RepoSnapshot;
+
 mod adapters;
+mod diagrams;
 mod discovery;
 mod graph;
+mod local_inspectors;
 mod policy;
 
 pub use adapters::{DefaultRepoLocator, LocalRepoFileSystem, RustWorkspaceInspector};
+pub use diagrams::{affected_mermaid, graph_mermaid};
 pub use discovery::DiscoveryService;
 pub use graph::DefaultGraphBuilder;
+pub use local_inspectors::{
+    LocalRustWorkspaceInspector, NodeWorkspaceInspector, PythonWorkspaceInspector,
+};
 pub use policy::{
     CrossAppDependencyRule, FoundationPublicClientOnlyRule, FrameworkFacadeOnlyRule,
     GeneratedCodeReadonlyRule, HighRiskIacRule, PolicyEngine, ProjectKindDependencyRule,
@@ -30,6 +40,26 @@ impl RepoctlEngine {
     /// Creates an engine with local filesystem, YAML parsing, graph, and policy adapters.
     pub fn with_default_adapters() -> Self {
         Self::default()
+    }
+
+    /// Shares a command-scoped immutable snapshot across capability services.
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use repoctl_core::DiscoverRequest;
+    /// use repoctl_engine::{DiscoveryService, RepoctlEngine};
+    /// # fn main() -> Result<(), repoctl_core::RepoctlError> {
+    /// let snapshot = DiscoveryService::default().discover(&DiscoverRequest::default())?;
+    /// let service = RepoctlEngine::from_snapshot(Arc::new(snapshot));
+    /// # let _ = service;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_snapshot(snapshot: Arc<RepoSnapshot>) -> Self {
+        Self {
+            discovery: DiscoveryService::from_snapshot(snapshot),
+            policies: PolicyEngine::default(),
+        }
     }
 
     /// Returns the discovery service.
@@ -63,8 +93,8 @@ mod tests {
                 repo: Some(temp.path().to_path_buf()),
             })
             .expect("snapshot");
-        assert!(snapshot.projects.is_empty());
-        assert!(snapshot.graph.nodes.is_empty());
+        assert_eq!(snapshot.projects.len(), 0);
+        assert_eq!(snapshot.graph.nodes.len(), 0);
     }
 
     #[test]
@@ -239,6 +269,32 @@ owners:
                 .iter()
                 .any(|diagnostic| diagnostic.code.as_ref() == "policy.high_risk_iac")
         );
+    }
+
+    #[test]
+    fn test_should_pin_one_snapshot_and_refresh_the_next_invocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        write_repo_manifest(temp.path());
+        let request = DiscoverRequest {
+            repo: Some(temp.path().to_path_buf()),
+        };
+        let initial = DiscoveryService::default().discover(&request)?;
+        let pinned = DiscoveryService::from_snapshot(std::sync::Arc::new(initial));
+        write_project(
+            temp.path(),
+            "apps/new",
+            "schema: company.project/v1\nname: apps.new\nkind: app\npath: apps/new\n",
+        );
+        assert_eq!(pinned.discover(&request)?.projects.len(), 0);
+        assert_eq!(
+            DiscoveryService::default()
+                .discover(&request)?
+                .projects
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     fn write_repo_manifest(root: &Path) {

@@ -26,3 +26,8 @@
 
 - [Agent Verification Budget Spec](repoctl-v0.6-agent-verification-budget-spec.md)
 - [Doctor And Agent Handoff Spec](repoctl-v0.6-doctor-agent-handoff-spec.md)
+
+## Reliable Multilingual Governance
+
+- [Product scope, design and acceptance contract](repoctl-reliable-governance-design.md)
+- [Acceptance evidence and verification boundaries](repoctl-reliable-governance-verification-plan.md)

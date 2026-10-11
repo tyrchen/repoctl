@@ -12,6 +12,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+blake3.workspace = true
+tokio.workspace = true
+ignore.workspace = true
 camino.workspace = true
 globset.workspace = true
 repoctl-core.workspace = true

@@ -16,6 +16,7 @@ use crate::{DefaultGraphBuilder, DefaultRepoLocator, LocalRepoFileSystem};
 /// Discovers repo manifests and builds snapshots.
 #[derive(Clone)]
 pub struct DiscoveryService {
+    snapshot: Option<Arc<RepoSnapshot>>,
     locator: Arc<dyn RepoLocator>,
     filesystem: Arc<dyn RepoFileSystem>,
     parser: Arc<dyn ManifestParser>,
@@ -31,6 +32,7 @@ impl std::fmt::Debug for DiscoveryService {
 impl Default for DiscoveryService {
     fn default() -> Self {
         Self {
+            snapshot: None,
             locator: Arc::new(DefaultRepoLocator),
             filesystem: Arc::new(LocalRepoFileSystem),
             parser: Arc::new(YamlManifestParser),
@@ -48,6 +50,7 @@ impl DiscoveryService {
         graph_builder: Arc<dyn GraphBuilder>,
     ) -> Self {
         Self {
+            snapshot: None,
             locator,
             filesystem,
             parser,
@@ -55,8 +58,33 @@ impl DiscoveryService {
         }
     }
 
+    /// Pins an immutable snapshot for one composite command.
+    ///
+    /// Callers must create a new service for a subsequent command invocation.
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use repoctl_core::DiscoverRequest;
+    /// use repoctl_engine::DiscoveryService;
+    /// # fn main() -> Result<(), repoctl_core::RepoctlError> {
+    /// let snapshot = DiscoveryService::default().discover(&DiscoverRequest::default())?;
+    /// let service = DiscoveryService::from_snapshot(Arc::new(snapshot));
+    /// # let _ = service;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_snapshot(snapshot: Arc<RepoSnapshot>) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+            ..Self::default()
+        }
+    }
+
     /// Discovers a repository and returns a validated snapshot.
     pub fn discover(&self, request: &DiscoverRequest) -> Result<RepoSnapshot, RepoctlError> {
+        if let Some(snapshot) = &self.snapshot {
+            return Ok(snapshot.as_ref().clone());
+        }
         let root = self.locator.locate(request.repo.as_deref())?;
         let repo_path = RepoRelativePath::new("repo.yaml").map_err(RepoctlError::diagnostic)?;
         let repo_bytes = self.filesystem.read_file(&root, &repo_path)?;

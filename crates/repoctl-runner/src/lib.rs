@@ -8,33 +8,44 @@
 
 //! Affected analysis, task runner, and CI matrix services.
 
+mod affected;
+mod cache;
+mod ci;
+mod context;
+mod git;
+mod planning;
+mod process;
+mod tasks;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use affected::compute_affected;
+pub use git::LocalGitProvider;
 use globset::Glob;
+use planning::plan_task_commands;
+pub use process::LocalProcessRunner;
 use repoctl_core::{
-    AffectedReason, AffectedReport, AffectedRequest, AiContext, AiContextRequest, CdnCheck,
-    CiFallback, CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest,
-    Diagnostic, DnsOperation, EdgeKind, IacFacadeReport, IacFacadeRequest, IacOperation,
-    IacProvider, ManualStateRecord, OpsJournalAction, OpsJournalReport, OpsJournalRequest, OpsPlan,
-    OpsPlanRequest, OpsReconcileReport, OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest,
-    PrSummary, PrSummaryRequest, ProbeSpec, ProcessCommand, ProcessOutput, ProcessRunner,
-    ProjectManifest, ProjectName, ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation,
-    ProviderCapabilityReport, ProviderCapabilityRequest, RepoRelativePath, RepoSnapshot,
-    RepoctlError, SessionEntry, SessionJournal, TaskCommandOutput, TaskDependency, TaskName,
-    TaskRunPlan, TaskRunReport, TaskRunRequest, Toolchain, ToolchainAdapter,
-    ToolchainEnvironmentInput,
+    AffectedReport, AffectedRequest, AiContext, AiContextRequest, CdnCheck, CiFallback,
+    CiMatrixReport, CiMatrixRequest, CodegenCheckReport, CodegenCheckRequest, Diagnostic,
+    DnsOperation, IacFacadeReport, IacFacadeRequest, IacOperation, IacProvider, ManualStateRecord,
+    OpsJournalAction, OpsJournalReport, OpsJournalRequest, OpsPlan, OpsPlanRequest,
+    OpsReconcileReport, OpsReconcileRequest, OpsVerifyReport, OpsVerifyRequest, PrSummary,
+    PrSummaryRequest, ProbeSpec, ProcessCommand, ProcessRunner, ProjectManifest, ProjectName,
+    ProtoFacadeReport, ProtoFacadeRequest, ProtoOperation, ProviderCapabilityReport,
+    ProviderCapabilityRequest, RepoRelativePath, RepoSnapshot, RepoctlError, SessionEntry,
+    SessionJournal, TaskCommandOutput, TaskExecutionOptions, TaskName, TaskRunPlan, TaskRunReport,
+    TaskRunRequest, Toolchain, ToolchainAdapter, ToolchainEnvironmentInput,
 };
 use repoctl_engine::RepoctlEngine;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
+use tasks::run_process_commands;
 
 /// Provides changed files for a git range.
 pub trait GitProvider: Send + Sync {
@@ -45,67 +56,6 @@ pub trait GitProvider: Send + Sync {
         base: &str,
         head: &str,
     ) -> Result<Vec<RepoRelativePath>, RepoctlError>;
-}
-
-/// Local git provider backed by `git diff --name-only`.
-#[derive(Clone, Debug, Default)]
-pub struct LocalGitProvider;
-
-impl GitProvider for LocalGitProvider {
-    fn changed_files(
-        &self,
-        repo: Option<&std::path::Path>,
-        base: &str,
-        head: &str,
-    ) -> Result<Vec<RepoRelativePath>, RepoctlError> {
-        let mut command = Command::new("git");
-        command.arg("diff").arg("--name-only").arg(base).arg(head);
-        if let Some(repo) = repo {
-            command.current_dir(repo);
-        }
-        let output = command.output().map_err(|source| {
-            RepoctlError::Environment(format!("failed to execute git diff: {source}"))
-        })?;
-        if !output.status.success() {
-            return Err(RepoctlError::Environment(format!(
-                "git diff failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| RepoRelativePath::new(line.to_string()).map_err(RepoctlError::diagnostic))
-            .collect()
-    }
-}
-
-/// Local process runner using argv form.
-#[derive(Clone, Debug, Default)]
-pub struct LocalProcessRunner;
-
-impl ProcessRunner for LocalProcessRunner {
-    fn run(&self, command: &ProcessCommand) -> Result<ProcessOutput, RepoctlError> {
-        let mut process = Command::new(&command.program);
-        process.args(&command.args);
-        process.envs(&command.env);
-        if let Some(absolute_cwd) = &command.absolute_cwd {
-            process.current_dir(absolute_cwd);
-        } else {
-            process.current_dir(command.cwd.as_str());
-        }
-        let output = process.output().map_err(|source| {
-            RepoctlError::Environment(format!(
-                "failed to execute `{}` in `{}`: {source}",
-                command.program, command.cwd
-            ))
-        })?;
-        Ok(ProcessOutput {
-            status: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
-    }
 }
 
 /// Rust task environment adapter.
@@ -314,6 +264,11 @@ impl RunnerService {
 
     /// Plans tasks without executing them.
     pub fn plan_tasks(&self, request: &TaskRunRequest) -> Result<TaskRunPlan, RepoctlError> {
+        if request.concurrency.is_some_and(|value| value.get() > 256) {
+            return Err(RepoctlError::Environment(
+                "task concurrency must be 1..=256".to_string(),
+            ));
+        }
         let snapshot = self
             .engine
             .discovery()
@@ -337,6 +292,9 @@ impl RunnerService {
             affected.as_ref(),
             &self.toolchain_adapters,
         )?;
+        for command in &commands {
+            cache::validate_outputs(command, &snapshot)?;
+        }
         Ok(TaskRunPlan {
             commands,
             concurrency: std::num::NonZeroUsize::new(
@@ -348,7 +306,18 @@ impl RunnerService {
 
     /// Runs selected tasks.
     pub fn run_tasks(&self, request: &TaskRunRequest) -> Result<TaskRunReport, RepoctlError> {
-        let plan = self.plan_tasks(request)?;
+        let snapshot = Arc::new(self.engine.discovery().discover(
+            &repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            },
+        )?);
+        let planner = Self::new_with_adapters(
+            RepoctlEngine::from_snapshot(Arc::clone(&snapshot)),
+            Arc::clone(&self.git),
+            Arc::clone(&self.process_runner),
+            self.toolchain_adapters.clone(),
+        );
+        let plan = planner.plan_tasks(request)?;
         if request.dry_run {
             let diagnostics = if plan.commands.is_empty() {
                 self.no_task_plan_diagnostics(request)?
@@ -363,13 +332,27 @@ impl RunnerService {
         }
         let mut diagnostics = Vec::new();
         let mut outputs = Vec::new();
-        for (command, output) in
-            run_process_commands(&self.process_runner, &plan.commands, plan.concurrency.get())?
-        {
+        for (command, output) in run_process_commands(
+            &self.process_runner,
+            &plan.commands,
+            plan.concurrency.get(),
+            &snapshot,
+            request.no_cache,
+        )? {
+            if let Some(warning) = &output.cache_warning {
+                diagnostics.push(
+                    Diagnostic::warning("task.cache.invalid", warning.clone())
+                        .with_path(command.cwd.as_str()),
+                );
+            }
             if output.status != 0 {
                 diagnostics.push(
                     Diagnostic::error(
-                        "task.failed",
+                        if output.status == 125 && output.stderr.starts_with("skipped:") {
+                            "task.skipped"
+                        } else {
+                            "task.failed"
+                        },
                         format!(
                             "task `{}` failed with status {}",
                             command.task.as_ref().map_or("<unknown>", TaskName::as_str),
@@ -397,6 +380,35 @@ impl RunnerService {
         })
     }
 
+    /// Explicitly installs selected CI dependencies before executing the task closure.
+    pub fn run_ci_step(
+        &self,
+        request: &TaskRunRequest,
+        install: bool,
+    ) -> Result<TaskRunReport, RepoctlError> {
+        if install && !request.dry_run {
+            let snapshot = self
+                .engine
+                .discovery()
+                .discover(&repoctl_core::DiscoverRequest {
+                    repo: request.repo.clone(),
+                })?;
+            let plan = self.plan_tasks(request)?;
+            let setup = ci::install(&self.process_runner, &plan.commands, &snapshot)?;
+            if let Some(output) = setup.iter().find(|o| o.status != 0) {
+                return Ok(TaskRunReport {
+                    commands: plan.commands,
+                    outputs: Vec::new(),
+                    diagnostics: vec![Diagnostic::error(
+                        "ci.install.failed",
+                        format!("dependency installation failed: {}", output.stderr),
+                    )],
+                });
+            }
+        }
+        self.run_tasks(request)
+    }
+
     /// Builds a CI matrix from affected task commands.
     pub fn ci_matrix(&self, request: &CiMatrixRequest) -> Result<CiMatrixReport, RepoctlError> {
         if request.changed_files.is_empty() && request.base.is_none() && request.head.is_none() {
@@ -418,6 +430,7 @@ impl RunnerService {
             }
         }
         let task_request = TaskRunRequest {
+            no_cache: false,
             repo: request.repo.clone(),
             tasks: request.tasks.clone(),
             projects: Vec::new(),
@@ -430,24 +443,18 @@ impl RunnerService {
             dry_run: true,
         };
         let plan = self.plan_tasks(&task_request)?;
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
         let mut seen = BTreeSet::new();
         let mut entries = Vec::new();
-        for command in plan.commands {
-            let project = command
-                .project
-                .map_or_else(String::new, |value| value.to_string());
-            let workspace = command
-                .workspace
-                .map_or_else(String::new, |value| value.to_string());
-            let task = command
-                .task
-                .map_or_else(String::new, |value| value.to_string());
-            if seen.insert((project.clone(), workspace.clone(), task.clone())) {
-                entries.push(json!({
-                    "project": project,
-                    "workspace": workspace,
-                    "task": task,
-                }));
+        for command in &plan.commands {
+            let id = (&command.project, &command.workspace, &command.task);
+            if seen.insert(id) {
+                entries.push(ci::entry(command, &plan.commands, &snapshot)?);
             }
         }
         let github_actions = if entries.is_empty() {
@@ -463,6 +470,7 @@ impl RunnerService {
 
     fn ci_matrix_all(&self, request: &CiMatrixRequest) -> Result<CiMatrixReport, RepoctlError> {
         let task_request = TaskRunRequest {
+            no_cache: false,
             repo: request.repo.clone(),
             tasks: request.tasks.clone(),
             projects: Vec::new(),
@@ -475,24 +483,18 @@ impl RunnerService {
             dry_run: true,
         };
         let plan = self.plan_tasks(&task_request)?;
+        let snapshot = self
+            .engine
+            .discovery()
+            .discover(&repoctl_core::DiscoverRequest {
+                repo: request.repo.clone(),
+            })?;
         let mut seen = BTreeSet::new();
         let mut entries = Vec::new();
-        for command in plan.commands {
-            let project = command
-                .project
-                .map_or_else(String::new, |value| value.to_string());
-            let workspace = command
-                .workspace
-                .map_or_else(String::new, |value| value.to_string());
-            let task = command
-                .task
-                .map_or_else(String::new, |value| value.to_string());
-            if seen.insert((project.clone(), workspace.clone(), task.clone())) {
-                entries.push(json!({
-                    "project": project,
-                    "workspace": workspace,
-                    "task": task,
-                }));
+        for command in &plan.commands {
+            let id = (&command.project, &command.workspace, &command.task);
+            if seen.insert(id) {
+                entries.push(ci::entry(command, &plan.commands, &snapshot)?);
             }
         }
         Ok(CiMatrixReport {
@@ -515,6 +517,7 @@ impl RunnerService {
                 let owners = proto_projects(&snapshot, selector, ProtoMatchKind::Owner)?;
                 let diagnostics = proto_empty_state_diagnostics(&snapshot, owners.is_empty());
                 Ok(ProtoFacadeReport {
+                    outputs: Vec::new(),
                     owners,
                     consumers: Vec::new(),
                     commands: Vec::new(),
@@ -526,29 +529,102 @@ impl RunnerService {
                 let consumers = proto_projects(&snapshot, selector, ProtoMatchKind::Consumer)?;
                 let diagnostics = proto_empty_state_diagnostics(&snapshot, consumers.is_empty());
                 Ok(ProtoFacadeReport {
+                    outputs: Vec::new(),
                     owners: Vec::new(),
                     consumers,
                     commands: Vec::new(),
                     diagnostics,
                 })
             }
-            ProtoOperation::Check => {
-                let changed_files = self.changed_files(
-                    request.repo.as_deref(),
-                    request.base.as_deref(),
-                    request.head.as_deref(),
-                    &request.changed_files,
-                )?;
-                let diagnostics = self.engine.policies().evaluate(&snapshot, &changed_files)?;
-                let commands = proto_check_commands(&snapshot);
-                Ok(ProtoFacadeReport {
-                    owners: Vec::new(),
-                    consumers: Vec::new(),
-                    commands,
-                    diagnostics,
-                })
+            ProtoOperation::Check => self.proto_check(request, &snapshot),
+        }
+    }
+
+    fn proto_check(
+        &self,
+        request: &ProtoFacadeRequest,
+        snapshot: &RepoSnapshot,
+    ) -> Result<ProtoFacadeReport, RepoctlError> {
+        let changed_files = self.changed_files(
+            request.repo.as_deref(),
+            request.base.as_deref(),
+            request.head.as_deref(),
+            &request.changed_files,
+        )?;
+        let mut diagnostics = self.engine.policies().evaluate(snapshot, &changed_files)?;
+        let mut commands = proto_check_commands(snapshot);
+        if let Some(against) = &request.against {
+            if against.is_empty()
+                || against.len() > 1024
+                || against.starts_with('-')
+                || against.bytes().any(|b| b.is_ascii_control())
+            {
+                return Err(RepoctlError::Environment(
+                    "invalid bounded Buf comparison source".to_string(),
+                ));
+            }
+            let mut breaking = commands.first().cloned().ok_or_else(|| {
+                RepoctlError::diagnostic(Diagnostic::error(
+                    "proto.buf.missing",
+                    "breaking checks require a Buf workspace at the configured proto root",
+                ))
+            })?;
+            breaking.cwd = RepoRelativePath::root();
+            breaking.absolute_cwd = Some(snapshot.root.absolute.as_std_path().to_path_buf());
+            breaking.args = vec![
+                "breaking".to_string(),
+                snapshot.repo_manifest.protos_root.to_string(),
+                "--against".to_string(),
+                against.clone(),
+            ];
+            commands.push(breaking);
+        }
+        if request.execute && commands.is_empty() {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "proto.buf.missing",
+                "executed proto checks require a Buf workspace",
+            )));
+        }
+        let mut outputs = Vec::new();
+        if request.execute {
+            for command in &commands {
+                let output = self.process_runner.run(command)?;
+                if output.status != 0 {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "proto.check.failed",
+                            format!(
+                                "Buf {} failed with status {}: {}",
+                                command.args.first().map_or("check", String::as_str),
+                                output.status,
+                                output.stderr
+                            ),
+                        )
+                        .with_path(command.cwd.as_str()),
+                    );
+                }
+                outputs.push(output);
             }
         }
+        let owners = snapshot
+            .projects
+            .iter()
+            .filter(|p| !p.protos.owns.is_empty())
+            .map(|p| p.name.clone())
+            .collect();
+        let consumers = snapshot
+            .projects
+            .iter()
+            .filter(|p| !p.protos.consumes.is_empty())
+            .map(|p| p.name.clone())
+            .collect();
+        Ok(ProtoFacadeReport {
+            outputs,
+            owners,
+            consumers,
+            commands,
+            diagnostics,
+        })
     }
 
     /// Checks generated-code direct edits.
@@ -600,7 +676,12 @@ impl RunnerService {
                 )
             })?;
         Ok(AiContext {
-            payload: project_ai_context(&snapshot, project, &request.audience),
+            payload: context::enrich(
+                project_ai_context(&snapshot, project, &request.audience),
+                request,
+                &snapshot,
+                project,
+            )?,
         })
     }
 
@@ -686,6 +767,7 @@ impl RunnerService {
         };
         let affected = compute_affected(&snapshot, &changed_files, &request.tasks);
         let task_request = TaskRunRequest {
+            no_cache: false,
             repo: request.repo.clone(),
             tasks: request.tasks.clone(),
             projects: Vec::new(),
@@ -954,7 +1036,23 @@ impl RunnerService {
         }
         match (base, head) {
             (Some(base), Some(head)) => self.git.changed_files(repo, base, head),
-            _ => Ok(Vec::new()),
+            (None, None) => {
+                let root = self
+                    .engine
+                    .discovery()
+                    .discover(&repoctl_core::DiscoverRequest {
+                        repo: repo.map(Path::to_path_buf),
+                    })?
+                    .root;
+                if root.absolute.join(".git").exists() {
+                    git::local_changes(Some(root.absolute.as_std_path()))
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            _ => Err(RepoctlError::Environment(
+                "both --base and --head are required for a git range".to_string(),
+            )),
         }
     }
 
@@ -962,15 +1060,6 @@ impl RunnerService {
         &self,
         request: &TaskRunRequest,
     ) -> Result<Vec<Diagnostic>, RepoctlError> {
-        if request.affected
-            && request.changed_files.is_empty()
-            && (request.base.is_none() || request.head.is_none())
-        {
-            return Ok(vec![Diagnostic::warning(
-                "task.plan.no_base_head",
-                "affected task planning requires --base and --head or --changed-file",
-            )]);
-        }
         let snapshot = self
             .engine
             .discovery()
@@ -1069,6 +1158,7 @@ impl ProtoToolchainAdapter for BufProtoToolchainAdapter {
             return Vec::new();
         }
         vec![ProcessCommand {
+            repo_root: Some(snapshot.root.absolute.as_std_path().to_path_buf()),
             cwd: snapshot.repo_manifest.protos_root.clone(),
             absolute_cwd: Some(buf_yaml.parent().map_or_else(
                 || snapshot.root.absolute.as_std_path().to_path_buf(),
@@ -2162,6 +2252,10 @@ fn iac_command(
     args: Vec<String>,
 ) -> ProcessCommand {
     ProcessCommand {
+        execution: TaskExecutionOptions::default(),
+        prerequisites: Vec::new(),
+        repo_root: Some(snapshot.root.absolute.as_std_path().to_path_buf()),
+        prerequisite_fingerprints: Vec::new(),
         project: target.project.map(|project| project.name.clone()),
         workspace: None,
         task: None,
@@ -2201,452 +2295,6 @@ fn iac_risk_flags(targets: &[IacTarget<'_>], changed_files: &[RepoRelativePath])
     flags.into_iter().collect()
 }
 
-fn compute_affected(
-    snapshot: &RepoSnapshot,
-    changed_files: &[RepoRelativePath],
-    requested_tasks: &[TaskName],
-) -> AffectedReport {
-    let mut direct = BTreeSet::new();
-    let mut transitive = BTreeSet::new();
-    let mut direct_workspaces = BTreeSet::new();
-    let mut reasons = Vec::new();
-    let mut risk_flags = Vec::new();
-    let mut reviewers = BTreeSet::new();
-    for changed_file in changed_files {
-        if changed_file.as_str() == "repo.yaml"
-            || changed_file.as_str().starts_with("templates/")
-            || changed_file.as_str().starts_with(".agents/skills/")
-            || changed_file.as_str().starts_with(".claude/skills/")
-            || changed_file.as_str().starts_with("crates/")
-            || changed_file.as_str().starts_with("apps/repoctl-cli/")
-        {
-            for project in &snapshot.projects {
-                direct.insert(project.name.clone());
-                reasons.push(reason(changed_file, &project.name, "repo-wide change"));
-            }
-            continue;
-        }
-        if changed_file.as_str().starts_with("core-infra/") {
-            risk_flags.push("core-infra".to_string());
-        }
-        if changed_file.as_str().contains("/iac/stacks/prod") {
-            risk_flags.push("prod-iac".to_string());
-        }
-        for project in &snapshot.projects {
-            if project.contains_path(changed_file) {
-                direct.insert(project.name.clone());
-                collect_matching_workspaces(project, changed_file, &mut direct_workspaces);
-                reasons.push(reason(changed_file, &project.name, "project file changed"));
-                reviewers.extend(project.owners.iter().cloned());
-            }
-            if proto_change_affects_project(project, changed_file) {
-                direct.insert(project.name.clone());
-                reasons.push(reason(
-                    changed_file,
-                    &project.name,
-                    "proto ownership or consumption",
-                ));
-                reviewers.extend(project.owners.iter().cloned());
-            }
-        }
-    }
-    propagate_reverse_dependencies(snapshot, &direct, &mut transitive, &mut reasons);
-    let all_projects = direct
-        .iter()
-        .chain(transitive.iter())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let workspaces = affected_workspaces(snapshot, &all_projects, &direct_workspaces);
-    let tasks = affected_tasks(snapshot, &all_projects, &workspaces, requested_tasks);
-    AffectedReport {
-        directly_affected: direct.into_iter().collect(),
-        transitively_affected: transitive.into_iter().collect(),
-        workspaces,
-        tasks,
-        risk_flags: unique_strings(risk_flags),
-        reasons,
-        suggested_reviewers: reviewers.into_iter().collect(),
-        diagnostics: Vec::new(),
-    }
-}
-
-fn reason(path: &RepoRelativePath, project: &ProjectName, message: &str) -> AffectedReason {
-    AffectedReason {
-        source: path.to_string(),
-        target: project.to_string(),
-        reason: message.to_string(),
-    }
-}
-
-fn proto_change_affects_project(
-    project: &ProjectManifest,
-    changed_file: &RepoRelativePath,
-) -> bool {
-    changed_file.as_str().starts_with("protos/")
-        && project
-            .protos
-            .owns
-            .iter()
-            .chain(project.protos.consumes.iter())
-            .any(|pattern| glob_match(pattern.as_str(), changed_file.as_str()))
-}
-
-fn glob_match(pattern: &str, path: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        path.starts_with(prefix)
-    } else {
-        pattern == path
-    }
-}
-
-fn propagate_reverse_dependencies(
-    snapshot: &RepoSnapshot,
-    direct: &BTreeSet<ProjectName>,
-    transitive: &mut BTreeSet<ProjectName>,
-    reasons: &mut Vec<AffectedReason>,
-) {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for edge in &snapshot.graph.edges {
-            if !matches!(
-                edge.kind,
-                EdgeKind::DependsOnProject
-                    | EdgeKind::UsesFrameworkFacade
-                    | EdgeKind::UsesFoundationClient
-                    | EdgeKind::ConsumesProto
-            ) {
-                continue;
-            }
-            let Some(target_project) = project_from_node(&edge.to) else {
-                continue;
-            };
-            let Ok(target) = ProjectName::new(target_project) else {
-                continue;
-            };
-            if !direct.contains(&target) && !transitive.contains(&target) {
-                continue;
-            }
-            let Some(source_project) = project_from_node(&edge.from) else {
-                continue;
-            };
-            let Ok(source) = ProjectName::new(source_project) else {
-                continue;
-            };
-            if direct.contains(&source) || transitive.contains(&source) {
-                continue;
-            }
-            reasons.push(AffectedReason {
-                source: target.to_string(),
-                target: source.to_string(),
-                reason: "reverse dependency propagation".to_string(),
-            });
-            transitive.insert(source);
-            changed = true;
-        }
-    }
-}
-
-fn project_from_node(node: &str) -> Option<String> {
-    node.strip_prefix("project:").map(ToString::to_string)
-}
-
-fn collect_matching_workspaces(
-    project: &ProjectManifest,
-    changed_file: &RepoRelativePath,
-    direct_workspaces: &mut BTreeSet<String>,
-) {
-    let mut matched = false;
-    for workspace in &project.workspaces {
-        if project
-            .path
-            .join_project(&workspace.root)
-            .is_ok_and(|root| changed_file.starts_with(&root))
-        {
-            direct_workspaces.insert(format!("{}:{}", project.name, workspace.name));
-            matched = true;
-        }
-    }
-    if !matched {
-        for workspace in &project.workspaces {
-            direct_workspaces.insert(format!("{}:{}", project.name, workspace.name));
-        }
-    }
-}
-
-fn affected_workspaces(
-    snapshot: &RepoSnapshot,
-    projects: &BTreeSet<ProjectName>,
-    direct_workspaces: &BTreeSet<String>,
-) -> Vec<String> {
-    let mut workspaces = Vec::new();
-    for project in &snapshot.projects {
-        if !projects.contains(&project.name) {
-            continue;
-        }
-        for workspace in &project.workspaces {
-            let id = format!("{}:{}", project.name, workspace.name);
-            let has_specific_workspaces = direct_workspaces
-                .iter()
-                .any(|workspace| workspace.starts_with(&format!("{}:", project.name)));
-            if direct_workspaces.is_empty()
-                || direct_workspaces.contains(&id)
-                || !has_specific_workspaces
-            {
-                workspaces.push(id);
-            }
-        }
-    }
-    workspaces
-}
-
-fn affected_tasks(
-    snapshot: &RepoSnapshot,
-    projects: &BTreeSet<ProjectName>,
-    workspaces: &[String],
-    requested_tasks: &[TaskName],
-) -> Vec<String> {
-    let workspace_set = workspaces.iter().cloned().collect::<BTreeSet<_>>();
-    let mut tasks = BTreeSet::new();
-    for project in &snapshot.projects {
-        if !projects.contains(&project.name) {
-            continue;
-        }
-        for (task, commands) in &project.tasks {
-            if !requested_tasks.is_empty() && !requested_tasks.contains(task) {
-                continue;
-            }
-            for command in commands {
-                let workspace_id = format!("{}:{}", project.name, command.workspace);
-                if !workspace_set.is_empty() && !workspace_set.contains(&workspace_id) {
-                    continue;
-                }
-                tasks.insert(format!("{}:{}:{}", project.name, command.workspace, task));
-            }
-        }
-    }
-    tasks.into_iter().collect()
-}
-
-fn plan_task_commands(
-    snapshot: &RepoSnapshot,
-    request: &TaskRunRequest,
-    affected: Option<&AffectedReport>,
-    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
-) -> Result<Vec<ProcessCommand>, RepoctlError> {
-    let affected_projects = affected.map(|report| {
-        report
-            .directly_affected
-            .iter()
-            .chain(report.transitively_affected.iter())
-            .cloned()
-            .collect::<BTreeSet<_>>()
-    });
-    let affected_workspaces =
-        affected.map(|report| report.workspaces.iter().cloned().collect::<BTreeSet<_>>());
-    let mut state = TaskPlanState::default();
-    for project in &snapshot.projects {
-        if !request.projects.is_empty() && !request.projects.contains(&project.name) {
-            continue;
-        }
-        if let Some(affected_projects) = &affected_projects
-            && !affected_projects.contains(&project.name)
-        {
-            continue;
-        }
-        for (task, task_commands) in &project.tasks {
-            if !request.tasks.is_empty() && !request.tasks.contains(task) {
-                continue;
-            }
-            for task_command in task_commands {
-                let workspace_id = format!("{}:{}", project.name, task_command.workspace);
-                if !request.workspaces.is_empty() && !request.workspaces.contains(&workspace_id) {
-                    continue;
-                }
-                if let Some(affected_workspaces) = &affected_workspaces
-                    && !affected_workspaces.contains(&workspace_id)
-                {
-                    continue;
-                }
-                append_task_command_with_dependencies(
-                    snapshot,
-                    project,
-                    task,
-                    task_command,
-                    toolchain_adapters,
-                    &mut state,
-                );
-            }
-        }
-    }
-    state.commands.into_iter().collect()
-}
-
-#[derive(Debug, Default)]
-struct TaskPlanState {
-    commands: Vec<Result<ProcessCommand, RepoctlError>>,
-    seen: BTreeSet<(ProjectName, repoctl_core::WorkspaceName, TaskName)>,
-    stack: BTreeSet<(ProjectName, repoctl_core::WorkspaceName, TaskName)>,
-}
-
-fn append_task_command_with_dependencies(
-    snapshot: &RepoSnapshot,
-    project: &ProjectManifest,
-    task: &TaskName,
-    task_command: &repoctl_core::TaskCommand,
-    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
-    state: &mut TaskPlanState,
-) {
-    let key = (
-        project.name.clone(),
-        task_command.workspace.clone(),
-        task.clone(),
-    );
-    if state.seen.contains(&key) {
-        return;
-    }
-    if !state.stack.insert(key.clone()) {
-        state.commands.push(Err(RepoctlError::diagnostic(
-            Diagnostic::error("task.dependency_cycle", "task prerequisite cycle detected")
-                .with_project(project.name.as_str()),
-        )));
-        return;
-    }
-    for dependency in &task_command.depends_on {
-        append_task_dependency(snapshot, dependency, toolchain_adapters, state);
-    }
-    state.commands.push(build_process_command(
-        snapshot,
-        project,
-        task,
-        task_command,
-        toolchain_adapters,
-    ));
-    state.seen.insert(key.clone());
-    state.stack.remove(&key);
-}
-
-fn append_task_dependency(
-    snapshot: &RepoSnapshot,
-    dependency: &TaskDependency,
-    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
-    state: &mut TaskPlanState,
-) {
-    let Some(project) = snapshot.project(&dependency.project) else {
-        state.commands.push(Err(RepoctlError::diagnostic(
-            Diagnostic::error(
-                "task.dependency_project_missing",
-                format!(
-                    "task prerequisite references missing project `{}`",
-                    dependency.project
-                ),
-            )
-            .with_project(dependency.project.as_str()),
-        )));
-        return;
-    };
-    let Some(task_commands) = project.tasks.get(&dependency.task) else {
-        state.commands.push(Err(RepoctlError::diagnostic(
-            Diagnostic::error(
-                "task.dependency_task_missing",
-                format!(
-                    "task prerequisite references missing task `{}`",
-                    dependency.task
-                ),
-            )
-            .with_project(project.name.as_str()),
-        )));
-        return;
-    };
-    for task_command in task_commands {
-        if task_command.workspace != dependency.workspace {
-            continue;
-        }
-        append_task_command_with_dependencies(
-            snapshot,
-            project,
-            &dependency.task,
-            task_command,
-            toolchain_adapters,
-            state,
-        );
-        return;
-    }
-    state.commands.push(Err(RepoctlError::diagnostic(
-        Diagnostic::error(
-            "task.dependency_workspace_missing",
-            format!(
-                "task prerequisite references missing workspace `{}`",
-                dependency.workspace
-            ),
-        )
-        .with_project(project.name.as_str()),
-    )));
-}
-
-fn build_process_command(
-    snapshot: &RepoSnapshot,
-    project: &ProjectManifest,
-    task: &TaskName,
-    task_command: &repoctl_core::TaskCommand,
-    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
-) -> Result<ProcessCommand, RepoctlError> {
-    let workspace = project
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.name == task_command.workspace)
-        .ok_or_else(|| {
-            RepoctlError::diagnostic(
-                Diagnostic::error(
-                    "task.workspace_missing",
-                    format!(
-                        "task `{task}` references missing workspace `{}`",
-                        task_command.workspace
-                    ),
-                )
-                .with_project(project.name.as_str()),
-            )
-        })?;
-    let cwd = project
-        .path
-        .join_project(&workspace.root)
-        .map_err(RepoctlError::diagnostic)?;
-    let absolute_cwd = Some(
-        snapshot
-            .root
-            .absolute
-            .join(cwd.as_str())
-            .as_std_path()
-            .to_path_buf(),
-    );
-    Ok(ProcessCommand {
-        project: Some(project.name.clone()),
-        workspace: Some(workspace.name.clone()),
-        task: Some(task.clone()),
-        cwd,
-        absolute_cwd,
-        program: task_command.command.program.clone(),
-        args: task_command.command.args.clone(),
-        env: toolchain_env(workspace, toolchain_adapters)?,
-    })
-}
-
-fn toolchain_env(
-    workspace: &repoctl_core::WorkspaceSpec,
-    toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
-) -> Result<BTreeMap<String, String>, RepoctlError> {
-    let mut env = BTreeMap::new();
-    let Some(toolchain) = &workspace.toolchain else {
-        return Ok(env);
-    };
-    for adapter in toolchain_adapters {
-        if adapter.toolchain() == *toolchain {
-            env.extend(adapter.environment(&ToolchainEnvironmentInput { workspace })?);
-        }
-    }
-    Ok(env)
-}
-
 fn default_toolchain_adapters() -> Vec<Arc<dyn ToolchainAdapter>> {
     vec![
         Arc::new(RustToolchainAdapter),
@@ -2656,36 +2304,6 @@ fn default_toolchain_adapters() -> Vec<Arc<dyn ToolchainAdapter>> {
         Arc::new(BunToolchainAdapter),
         Arc::new(UvToolchainAdapter),
     ]
-}
-
-fn run_process_commands(
-    runner: &Arc<dyn ProcessRunner>,
-    commands: &[ProcessCommand],
-    concurrency: usize,
-) -> Result<Vec<(ProcessCommand, ProcessOutput)>, RepoctlError> {
-    let limit = concurrency.max(1);
-    let mut outputs = Vec::with_capacity(commands.len());
-    for chunk in commands.chunks(limit) {
-        let mut handles = Vec::with_capacity(chunk.len());
-        for command in chunk.iter().cloned() {
-            let runner = Arc::clone(runner);
-            handles.push(std::thread::spawn(move || {
-                let output = runner.run(&command)?;
-                Ok::<_, RepoctlError>((command, output))
-            }));
-        }
-        for handle in handles {
-            match handle.join() {
-                Ok(result) => outputs.push(result?),
-                Err(_) => {
-                    return Err(RepoctlError::Internal(
-                        "task worker panicked while running a command".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-    Ok(outputs)
 }
 
 fn unique_strings(values: Vec<String>) -> Vec<String> {
@@ -2721,6 +2339,55 @@ mod tests {
                 .iter()
                 .any(|task| task == "apps.catalog:api:check")
         );
+    }
+
+    #[test]
+    fn test_should_propagate_every_project_dependency_surface_and_handle_cycles() {
+        use repoctl_core::{EdgeKind, GraphEdge};
+        for kind in [
+            EdgeKind::DependsOnProject,
+            EdgeKind::UsesFrameworkFacade,
+            EdgeKind::UsesFoundationClient,
+            EdgeKind::ConsumesProto,
+            EdgeKind::UsesFrameworkInternal,
+            EdgeKind::UsesFoundationInternal,
+            EdgeKind::UsesCoreInfraModule,
+            EdgeKind::UsesCoreInfraInternalModule,
+        ] {
+            let mut snapshot = fixture_snapshot();
+            let mut consumer = snapshot.projects.first().expect("fixture project").clone();
+            consumer.name = ProjectName::new("apps.other").expect("consumer");
+            consumer.path = RepoRelativePath::new("apps/other").expect("path");
+            snapshot.projects.push(consumer);
+            snapshot.graph.add_edge(GraphEdge {
+                from: "project:apps.other".to_string(),
+                to: "project:apps.catalog".to_string(),
+                kind: kind.clone(),
+                evidence: Some("fixture manifest".to_string()),
+            });
+            snapshot.graph.add_edge(GraphEdge {
+                from: "project:apps.catalog".to_string(),
+                to: "project:apps.other".to_string(),
+                kind: kind.clone(),
+                evidence: None,
+            });
+            let report = compute_affected(
+                &snapshot,
+                &[RepoRelativePath::new("apps/catalog/source").expect("path")],
+                &[],
+            );
+            assert_eq!(
+                report.transitively_affected,
+                vec![ProjectName::new("apps.other").expect("consumer")]
+            );
+            assert!(
+                report
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.edge_kind.as_ref() == Some(&kind)
+                        && reason.evidence.as_deref() == Some("fixture manifest"))
+            );
+        }
     }
 
     #[test]
@@ -2798,6 +2465,7 @@ mod tests {
         tasks.insert(
             TaskName::new("check").expect("task"),
             vec![TaskCommand {
+                execution: TaskExecutionOptions::default(),
                 workspace: WorkspaceName::new("api").expect("workspace"),
                 command: CommandSpec::parse("cargo check --workspace").expect("command"),
                 depends_on: Vec::new(),

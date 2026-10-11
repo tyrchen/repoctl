@@ -8,7 +8,7 @@ use repoctl_core::{
     WorkspaceInspector,
 };
 
-use crate::RustWorkspaceInspector;
+use crate::{LocalRustWorkspaceInspector, NodeWorkspaceInspector, PythonWorkspaceInspector};
 
 /// Default graph builder combining manifest edges and workspace inspector edges.
 #[derive(Clone)]
@@ -27,7 +27,11 @@ impl std::fmt::Debug for DefaultGraphBuilder {
 impl Default for DefaultGraphBuilder {
     fn default() -> Self {
         Self {
-            inspectors: vec![Arc::new(RustWorkspaceInspector)],
+            inspectors: vec![
+                Arc::new(LocalRustWorkspaceInspector),
+                Arc::new(NodeWorkspaceInspector),
+                Arc::new(PythonWorkspaceInspector),
+            ],
         }
     }
 }

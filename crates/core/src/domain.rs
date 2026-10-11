@@ -13,7 +13,10 @@ use globset::Glob;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::diagnostic::{Diagnostic, Severity};
+use crate::{
+    diagnostic::{Diagnostic, Severity},
+    execution::TaskExecutionOptions,
+};
 
 const NAME_MAX_BYTES: usize = 128;
 const OWNER_MAX_BYTES: usize = 64;
@@ -981,6 +984,9 @@ pub struct WorkspaceSpec {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCommand {
+    /// Process limits and opt-in cache configuration.
+    #[serde(default)]
+    pub execution: TaskExecutionOptions,
     /// Workspace that should execute the command.
     pub workspace: WorkspaceName,
     /// Command in argv form.
@@ -1857,6 +1863,12 @@ pub struct AffectedReport {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AffectedReason {
+    /// Dependency edge kind for propagated impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_kind: Option<EdgeKind>,
+    /// Manifest or package evidence for propagated impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
     /// Changed or propagated source.
     pub source: String,
     /// Affected target.
@@ -1869,6 +1881,9 @@ pub struct AffectedReason {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRunRequest {
+    /// Bypass local cache reads and writes.
+    #[serde(default)]
+    pub no_cache: bool,
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
     /// Requested task names.
@@ -1931,6 +1946,18 @@ pub struct TaskCommandOutput {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessCommand {
+    /// Stable fingerprints of completed prerequisite tasks.
+    #[serde(default)]
+    pub prerequisite_fingerprints: Vec<String>,
+    /// Prerequisite task identities.
+    #[serde(default)]
+    pub prerequisites: Vec<String>,
+    /// Process limits and opt-in cache configuration.
+    #[serde(default)]
+    pub execution: TaskExecutionOptions,
+    /// Absolute repository root for local task caching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<PathBuf>,
     /// Project id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectName>,
@@ -1957,6 +1984,15 @@ pub struct ProcessCommand {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessOutput {
+    /// Stable input/result fingerprint used by dependent cached tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Cache integrity warning when an entry was ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_warning: Option<String>,
+    /// Whether this successful output was restored from the local cache.
+    #[serde(default)]
+    pub cached: bool,
     /// Exit status code.
     pub status: i32,
     /// Captured stdout.
@@ -2249,6 +2285,9 @@ pub struct AdoptionFileOperation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencyRewrite {
+    /// Exact manifest table path for the dependency alias.
+    #[serde(default)]
+    pub table: Vec<String>,
     /// File being rewritten.
     pub file: RepoRelativePath,
     /// Package or crate dependency name.
@@ -2325,6 +2364,15 @@ pub struct PrSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiContextRequest {
+    /// Explicit changed source files to include.
+    #[serde(default)]
+    pub changed_files: Vec<RepoRelativePath>,
+    /// Include project-declared documentation.
+    #[serde(default)]
+    pub include_docs: bool,
+    /// Maximum serialized enriched context bytes.
+    #[serde(default = "default_context_budget")]
+    pub max_bytes: usize,
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
     /// Project to build context for.
@@ -2367,6 +2415,12 @@ pub struct CodegenCheckReport {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtoFacadeRequest {
+    /// Buf comparison source for breaking-change detection.
+    #[serde(default)]
+    pub against: Option<String>,
+    /// Execute Buf checks instead of only planning.
+    #[serde(default)]
+    pub execute: bool,
     /// Optional starting path or explicit repo root.
     pub repo: Option<PathBuf>,
     /// Proto operation.
@@ -2399,6 +2453,9 @@ pub enum ProtoOperation {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtoFacadeReport {
+    /// Outputs from executed Buf commands.
+    #[serde(default)]
+    pub outputs: Vec<ProcessOutput>,
     /// Matching owner projects.
     pub owners: Vec<ProjectName>,
     /// Matching consumer projects.
@@ -3078,6 +3135,10 @@ fn default_code_size_excludes() -> Vec<RepoGlob> {
     .into_iter()
     .filter_map(|pattern| RepoGlob::new(pattern).ok())
     .collect()
+}
+
+fn default_context_budget() -> usize {
+    65_536
 }
 
 #[cfg(test)]

@@ -185,7 +185,7 @@ impl WorkspaceInspector for RustWorkspaceInspector {
     }
 }
 
-fn classify_path_dependency(
+pub(super) fn classify_path_dependency(
     input: &WorkspaceInspectionInput<'_>,
     relative: &RepoRelativePath,
 ) -> Option<DiscoveredEdge> {
