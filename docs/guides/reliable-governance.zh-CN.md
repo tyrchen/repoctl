@@ -102,7 +102,10 @@ repoctl affected --changed-file frameworks/ui/src/index.ts --diagram mermaid
 配置；重名包及无法解析的 workspace 继承会失败。归类依据内容或 `--map`，任务依据实际
 workspace、Node scripts/TypeScript 配置及 Python 编译检查生成。Python 依赖源重写不在本版本内。
 混合仓库中的嵌套 Cargo 包也会生成任务，工作区名称在所有语言间保持唯一。
-普通 Cargo 包的项目内路径依赖会继续向下发现；根目录 Rust 工具链变更会选中全部工作区。
+Cargo 成员按真实工作区根目录及共享锁文件归组，任务使用 `--workspace`，完整验证每组只执行一次；
+独立嵌套包仍单独检查，有锁文件时完整验证使用 `--locked`。
+普通 Cargo 包的项目内路径依赖会继续向下发现；被实际引用的排除包也参与依赖发现。
+根目录 Rust 工具链及 Make/Just/Task 任务入口变更会选中全部工作区。
 Node 子包保留独立任务，并继承最近的锁文件及包管理器，CI 在锁文件所属目录安装依赖。
 没有锁文件时不会生成虚假的锁文件声明。
 Python 子包同样继承最近的 `uv.lock`，安装在锁文件所属目录执行 `uv sync --frozen`。

@@ -30,4 +30,4 @@
 ## Reliable Multilingual Governance
 
 - [Product scope, design and acceptance contract](repoctl-reliable-governance-design.md)
-- [Acceptance, cache, Cargo graph and migration safety regressions](repoctl-reliable-governance-verification-plan.md)
+- [Acceptance, cache, Cargo ownership and migration safety regressions](repoctl-reliable-governance-verification-plan.md)

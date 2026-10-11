@@ -15,8 +15,8 @@ use std::{
 
 use packages::{PackageIndex, PackageManifest, inspect_packages, package_index};
 use repoctl_core::{
-    Diagnostic, DiscoveredEdge, GraphBuildInput, RepoRelativePath, RepoctlError,
-    WorkspaceInspectionInput, WorkspaceInspector, WorkspaceLanguage,
+    Diagnostic, DiscoveredEdge, GraphBuildInput, ProjectRelativePath, RepoRelativePath, RepoRoot,
+    RepoctlError, WorkspaceInspectionInput, WorkspaceInspector, WorkspaceLanguage,
 };
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item, TableLike};
@@ -30,6 +30,34 @@ const MAX_MANIFEST_BYTES: u64 = 262_144;
 pub struct LocalRustWorkspaceInspector;
 
 impl LocalRustWorkspaceInspector {
+    /// Groups inventoried Cargo manifests by their actual workspace root offline.
+    ///
+    /// Resolves explicit/globbed members, implicit path members, exclusions and
+    /// `package.workspace`. Standalone packages remain separate roots.
+    ///
+    /// # Errors
+    /// Returns an error for missing/invalid manifests, inconsistent membership,
+    /// escaped paths or inventories exceeding package/text/traversal limits.
+    ///
+    /// ```no_run
+    /// use repoctl_core::{ProjectRelativePath, RepoRoot, RepoctlError};
+    /// use repoctl_engine::LocalRustWorkspaceInspector;
+    /// # fn main() -> Result<(), RepoctlError> {
+    /// let root = RepoRoot::new("/projects/source".into()).map_err(RepoctlError::diagnostic)?;
+    /// let manifests = [ProjectRelativePath::new("Cargo.toml").map_err(RepoctlError::diagnostic)?];
+    /// let roots = LocalRustWorkspaceInspector.workspace_roots(&root, &manifests)?;
+    /// # let _ = roots;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn workspace_roots(
+        &self,
+        root: &RepoRoot,
+        manifests: &[ProjectRelativePath],
+    ) -> Result<Vec<ProjectRelativePath>, RepoctlError> {
+        cargo::workspace_roots(root, manifests)
+    }
+
     /// Detects protobuf compiler requirements across the offline Cargo workspace.
     ///
     /// Examines member manifests and their configured or default build scripts.
@@ -395,9 +423,9 @@ fn cargo_tables(
 fn inherited_cargo_dependency(
     path: &Path,
     name: &str,
-    input: &WorkspaceInspectionInput<'_>,
+    root: &Path,
 ) -> Result<Option<(PathBuf, String)>, RepoctlError> {
-    if let Some(text) = read_manifest(path, input.root.absolute.as_std_path())? {
+    if let Some(text) = read_manifest(path, root)? {
         let doc = parse_toml(&text, path)?;
         if let Some(workspace) =
             toml_path(doc.as_item(), &["package", "workspace"]).and_then(Item::as_str)
@@ -406,10 +434,9 @@ fn inherited_cargo_dependency(
                 .parent()
                 .ok_or_else(|| manifest_error(path, "manifest has no parent"))?;
             let manifest = parent.join(workspace).join("Cargo.toml");
-            let text =
-                read_manifest(&manifest, input.root.absolute.as_std_path())?.ok_or_else(|| {
-                    manifest_error(path, "explicit Cargo workspace manifest is missing")
-                })?;
+            let text = read_manifest(&manifest, root)?.ok_or_else(|| {
+                manifest_error(path, "explicit Cargo workspace manifest is missing")
+            })?;
             let doc = parse_toml(&text, &manifest)?;
             return Ok(
                 toml_path(doc.as_item(), &["workspace", "dependencies", name, "path"])
@@ -422,10 +449,10 @@ fn inherited_cargo_dependency(
         .parent()
         .into_iter()
         .flat_map(Path::ancestors)
-        .filter(|p| p.starts_with(input.root.absolute.as_std_path()))
+        .filter(|p| p.starts_with(root))
     {
         let manifest = ancestor.join("Cargo.toml");
-        if let Some(text) = read_manifest(&manifest, input.root.absolute.as_std_path())? {
+        if let Some(text) = read_manifest(&manifest, root)? {
             let doc = parse_toml(&text, &manifest)?;
             if doc.get("workspace").is_some() {
                 return Ok(

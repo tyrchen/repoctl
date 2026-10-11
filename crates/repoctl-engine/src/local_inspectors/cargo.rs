@@ -15,6 +15,10 @@ use super::{
     read_manifest,
 };
 
+mod ownership;
+
+pub(super) use ownership::workspace_roots;
+
 const MAX_MEMBERS: usize = 4096;
 const MAX_ENTRIES: usize = 100_000;
 
@@ -81,6 +85,7 @@ pub(super) fn requires_protoc(
 struct TraversalScope<'a> {
     root: &'a Path,
     exclusions: Option<(&'a GlobSet, &'a Path)>,
+    inventory: Option<&'a BTreeSet<PathBuf>>,
 }
 
 fn walk(
@@ -102,11 +107,22 @@ fn walk(
         } else {
             project_root.as_std_path()
         },
-        exclusions: (!follow_external_paths).then_some((&excluded, directory)),
+        // Exclusions affect membership, not traversal of dependencies actually used.
+        exclusions: None,
+        inventory: None,
     };
     let mut queue = VecDeque::from([(manifest.to_path_buf(), doc.clone())]);
-    for member in members(directory, manifest, doc, &excluded, input)? {
-        queue.push_back((member.clone(), required_manifest(&member, input)?));
+    for member in members(
+        directory,
+        manifest,
+        doc,
+        &excluded,
+        input.root.absolute.as_std_path(),
+    )? {
+        queue.push_back((
+            member.clone(),
+            required_manifest(&member, input.root.absolute.as_std_path())?,
+        ));
     }
     let mut visited = BTreeSet::new();
     while let Some((path, document)) = queue.pop_front() {
@@ -120,22 +136,51 @@ fn walk(
             ));
         }
         on_manifest(&path, &document)?;
-        cargo_tables(&document, &mut |table| {
-            for (name, item) in table.iter() {
-                let dependency = if let Some(local) = item.get("path").and_then(Item::as_str) {
-                    Some((path.clone(), local.to_string()))
-                } else if item.get("workspace").and_then(Item::as_bool) == Some(true) {
-                    inherited_cargo_dependency(&path, name, input)?
-                } else {
-                    None
-                };
-                if let Some((origin, local)) = dependency {
-                    on_dependency(&origin, &local, name)?;
-                    enqueue_path_package(&origin, &local, &scope, input, &visited, &mut queue)?;
-                }
+        visit_dependencies(
+            &path,
+            &document,
+            input.root.absolute.as_std_path(),
+            &mut |origin, local, name| {
+                on_dependency(origin, local, name)?;
+                enqueue_path_package(
+                    origin,
+                    local,
+                    &scope,
+                    input.root.absolute.as_std_path(),
+                    &visited,
+                    &mut queue,
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn visit_dependencies(
+    path: &Path,
+    document: &DocumentMut,
+    repository: &Path,
+    visitor: &mut impl FnMut(&Path, &str, &str) -> Result<(), RepoctlError>,
+) -> Result<(), RepoctlError> {
+    cargo_tables(document, &mut |table| {
+        for (name, item) in table.iter() {
+            if let Some(local) = item.get("path").and_then(Item::as_str) {
+                validate_dependency_path(path, local)?;
+                visitor(path, local, name)?;
+            } else if item.get("workspace").and_then(Item::as_bool) == Some(true)
+                && let Some((origin, local)) = inherited_cargo_dependency(path, name, repository)?
+            {
+                validate_dependency_path(&origin, &local)?;
+                visitor(&origin, &local, name)?;
             }
-            Ok(())
-        })?;
+        }
+        Ok(())
+    })
+}
+
+fn validate_dependency_path(manifest: &Path, local: &str) -> Result<(), RepoctlError> {
+    if local.len() > 4096 || local.contains('\0') {
+        return Err(manifest_error(manifest, "invalid dependency path"));
     }
     Ok(())
 }
@@ -144,7 +189,7 @@ fn enqueue_path_package(
     origin: &Path,
     local: &str,
     scope: &TraversalScope<'_>,
-    input: &WorkspaceInspectionInput<'_>,
+    repository: &Path,
     visited: &BTreeSet<PathBuf>,
     queue: &mut VecDeque<(PathBuf, DocumentMut)>,
 ) -> Result<(), RepoctlError> {
@@ -172,22 +217,28 @@ fn enqueue_path_package(
         && !queue.iter().any(|(queued, _)| queued == &manifest)
         && manifest.is_file()
     {
+        if scope
+            .inventory
+            .is_some_and(|paths| !paths.contains(&manifest))
+        {
+            return Err(manifest_error(
+                &manifest,
+                "Cargo member is absent from the inventoried manifest set",
+            ));
+        }
         if queue.len().saturating_add(visited.len()) >= MAX_MEMBERS {
             return Err(manifest_error(
                 &manifest,
                 "Cargo workspace exceeds 4096 packages",
             ));
         }
-        queue.push_back((manifest.clone(), required_manifest(&manifest, input)?));
+        queue.push_back((manifest.clone(), required_manifest(&manifest, repository)?));
     }
     Ok(())
 }
 
-fn required_manifest(
-    path: &Path,
-    input: &WorkspaceInspectionInput<'_>,
-) -> Result<DocumentMut, RepoctlError> {
-    let text = read_manifest(path, input.root.absolute.as_std_path())?
+fn required_manifest(path: &Path, repository: &Path) -> Result<DocumentMut, RepoctlError> {
+    let text = read_manifest(path, repository)?
         .ok_or_else(|| manifest_error(path, "Cargo member manifest is missing"))?;
     parse_toml(&text, path)
 }
@@ -243,7 +294,7 @@ fn members(
     manifest: &Path,
     doc: &DocumentMut,
     excluded: &GlobSet,
-    input: &WorkspaceInspectionInput<'_>,
+    repository: &Path,
 ) -> Result<BTreeSet<PathBuf>, RepoctlError> {
     let mut result = BTreeSet::new();
     let mut count = 0_usize;
@@ -253,7 +304,7 @@ fn members(
     }
     for pattern in patterns {
         result.extend(expand_member_pattern(
-            root, pattern, manifest, excluded, input, &mut count,
+            root, pattern, manifest, excluded, repository, &mut count,
         )?);
         if result.len() > MAX_MEMBERS {
             return Err(manifest_error(
@@ -270,7 +321,7 @@ fn expand_member_pattern(
     pattern: &str,
     manifest: &Path,
     excluded: &GlobSet,
-    input: &WorkspaceInspectionInput<'_>,
+    repository: &Path,
     count: &mut usize,
 ) -> Result<BTreeSet<PathBuf>, RepoctlError> {
     let mut result = BTreeSet::new();
@@ -283,7 +334,7 @@ fn expand_member_pattern(
             return Ok(result);
         }
         let member = root.join(pattern).join("Cargo.toml");
-        required_manifest(&member, input)?;
+        required_manifest(&member, repository)?;
         result.insert(
             member
                 .canonicalize()
@@ -291,7 +342,7 @@ fn expand_member_pattern(
         );
         return Ok(result);
     }
-    let Some(base) = member_base(root, &prefix, manifest, input)? else {
+    let Some(base) = member_base(root, &prefix, manifest, repository)? else {
         return Ok(result);
     };
     let suffix = Path::new(pattern)
@@ -335,7 +386,7 @@ fn expand_member_pattern(
             && !excluded.is_match(directory.strip_prefix(root).unwrap_or(directory))
         {
             let member = directory.join("Cargo.toml");
-            required_manifest(&member, input)?;
+            required_manifest(&member, repository)?;
             result.insert(member);
             if result.len() > MAX_MEMBERS {
                 return Err(manifest_error(
@@ -352,7 +403,7 @@ fn member_base(
     root: &Path,
     prefix: &Path,
     manifest: &Path,
-    input: &WorkspaceInspectionInput<'_>,
+    repository: &Path,
 ) -> Result<Option<PathBuf>, RepoctlError> {
     let mut base = PathBuf::new();
     for part in root.join(prefix).components() {
@@ -364,7 +415,7 @@ fn member_base(
             _ => base.push(part.as_os_str()),
         }
     }
-    if !base.starts_with(input.root.absolute.as_std_path()) {
+    if !base.starts_with(repository) {
         return Err(manifest_error(manifest, "Cargo members escape repository"));
     }
     if !base.exists() {
@@ -373,7 +424,7 @@ fn member_base(
     let base = base
         .canonicalize()
         .map_err(|error| RepoctlError::io(base.display().to_string(), error))?;
-    if !base.starts_with(input.root.absolute.as_std_path()) {
+    if !base.starts_with(repository) {
         return Err(manifest_error(manifest, "Cargo members escape repository"));
     }
     Ok(Some(base))

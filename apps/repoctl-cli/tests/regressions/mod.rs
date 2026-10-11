@@ -9,6 +9,7 @@ mod contracts;
 mod review;
 mod review_round_five;
 mod review_round_four;
+mod review_round_six;
 mod review_round_two;
 
 use std::{fs, process::Command};

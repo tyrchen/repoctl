@@ -157,8 +157,10 @@ Python compile checks. Python dependency-source rewriting is not included.
 Cargo virtual workspaces expand explicit/globbed members and excludes offline,
 including inherited, target-specific and implicit member path dependencies. Ordinary
 Cargo packages also expose dependencies of project-local path packages. Pinned root
-toolchain changes select every workspace. Adoption emits tasks for nested Cargo
-manifests and assigns unique workspace names across all languages.
+toolchain and root Make/Just/Task routing changes select every workspace. Adoption
+groups Cargo members under their actual workspace root and shared lockfile, emits
+`--workspace` tasks and verifies each owning root once. Independent nested packages
+remain separate, and workspace names are unique across all languages.
 Node child packages keep their scripts while inheriting the nearest lockfile owner
 and package manager; CI installs in the owner directory. Unlocked packages do not
 declare invented lockfiles.

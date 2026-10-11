@@ -73,12 +73,13 @@ tasks:
 
 #[test]
 fn test_should_follow_local_path_packages_without_a_cargo_workspace_table() -> TestResult {
-    check_local_cargo_closure(".", "helper")?;
-    check_local_cargo_closure("backend", "../helper")?;
+    check_local_cargo_closure(".", "helper", false)?;
+    check_local_cargo_closure("backend", "../helper", false)?;
+    check_local_cargo_closure(".", "helper", true)?;
     Ok(())
 }
 
-fn check_local_cargo_closure(root: &str, helper_path: &str) -> TestResult {
+fn check_local_cargo_closure(root: &str, helper_path: &str, excluded: bool) -> TestResult {
     let temp = fixture()?;
     let manifest = if root == "." {
         "Cargo.toml".to_string()
@@ -103,6 +104,12 @@ fn check_local_cargo_closure(root: &str, helper_path: &str) -> TestResult {
              {helper_path}'}}\n"
         ),
     )?;
+    if excluded {
+        let path = temp.path().join(format!("apps/catalog/{manifest}"));
+        let mut content = fs::read_to_string(&path)?;
+        content.push_str("[workspace]\nexclude=['helper']\n");
+        fs::write(path, content)?;
+    }
     write(
         temp.path(),
         "apps/catalog/helper/Cargo.toml",

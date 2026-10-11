@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 130 regular tests and eight doctests. The separately
+The workspace suite contains 134 regular tests and nine doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -275,6 +275,38 @@ Two further findings are valid and fixed. Two end-to-end tests in
 Build, 130 workspace tests, eight doctests, 130 nextest cases, nightly formatting,
 strict pedantic clippy and API documentation pass. Doctor and all seven changed
 Rust files pass size checks with zero findings. The all-source scan retains 13
+existing warnings. Dependencies, packaging, agent instructions and Buf execution
+are unchanged; their unrelated heavyweight gates were not repeated. Hosted Linux
+CI continues to exercise real Buf.
+
+
+## Root automation and Cargo ownership review follow-up
+
+Three further findings are valid and fixed. Two end-to-end tests in
+[root automation and Cargo ownership](../apps/repoctl-cli/tests/regressions/review_round_six.rs)
+and two unit tests in [Cargo ownership](../crates/repoctl-engine/src/local_inspectors/cargo/ownership.rs) cover:
+
+- Root Makefile/makefile/GNUmakefile/cargo-make, Just and Task routing files select
+  every project/task and CI row. Project-local Makefiles retain project selection.
+- One Cargo workspace with glob members, an implicit helper and an explicit sibling
+  `package.workspace` is grouped under its actual root and lock. Excluded bare
+  packages and nested independent workspaces remain separate. Three Cargo owners
+  emit three verification commands/check rows, rather than repeating the entire
+  member set. Generated commands use `--workspace` and use `--locked` when a lock
+  exists, following the [Cargo workspace contract](https://doc.rust-lang.org/cargo/reference/workspaces.html).
+- Planned verification actually runs offline for all three roots. `ci run-step
+  --install` executes the root successfully, then rejects a valid but empty/stale
+  v4 lock without changing it. Standalone packages do not inherit an unrelated
+  ancestor lock. Missing inventory members and conflicting explicit pointers fail.
+- Cargo ownership and graph traversal share bounded member/dependency expansion.
+  Ownership caps inventory at 4096 manifests and 64 MiB of text, canonicalizes the
+  root, and refuses un-inventoried implicit members before queuing them. The offline
+  graph regression also covers an actually referenced excluded helper: membership
+  exclusions cannot suppress dependency impact or boundary detection.
+
+Build, 134 workspace tests, nine doctests, 134 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. Doctor and all ten changed Rust
+files pass size checks with zero findings. All-source inspection retains its 13
 existing warnings. Dependencies, packaging, agent instructions and Buf execution
 are unchanged; their unrelated heavyweight gates were not repeated. Hosted Linux
 CI continues to exercise real Buf.

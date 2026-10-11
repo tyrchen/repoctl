@@ -17,6 +17,7 @@ use super::{
     node::{nearest_lockfile, node_install},
     placement::PlacementDecision,
     process_command,
+    rust::workspace_roots,
     source_walk::read_text,
 };
 
@@ -34,7 +35,7 @@ pub(super) fn synthesize_project_manifest(
         project_kind_manifest_name(&placement.kind),
         placement.destination,
     );
-    let workspaces = synthesize_workspaces(inventory);
+    let workspaces = synthesize_workspaces(source_path, inventory)?;
     if !workspaces.is_empty() {
         output.push_str("\nworkspaces:\n");
         for workspace in &workspaces {
@@ -94,14 +95,13 @@ pub(super) fn project_name_for_destination(
     ProjectName::new(name).map_err(RepoctlError::diagnostic)
 }
 
-fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
+fn synthesize_workspaces(
+    source: &Utf8Path,
+    inventory: &SourceInventory,
+) -> Result<Vec<String>, RepoctlError> {
     let mut workspaces = Vec::new();
     let mut names = BTreeSet::new();
-    for manifest in inventory
-        .manifests
-        .iter()
-        .filter(|path| path.ends_with("Cargo.toml"))
-    {
+    for manifest in workspace_roots(source, inventory)? {
         let root = manifest.strip_suffix("/Cargo.toml").unwrap_or(".");
         let base = if root == "." {
             "rust".to_string()
@@ -109,7 +109,7 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
             format!("rust-{}", root.replace('/', "-"))
         };
         let name = unique_workspace_name(base, "rust", &mut names);
-        let lock = Utf8Path::new(manifest).with_file_name("Cargo.lock");
+        let lock = Utf8Path::new(&manifest).with_file_name("Cargo.lock");
         let lockfile = if inventory.manifests.iter().any(|path| path == lock.as_str()) {
             format!("    lockfile: {lock}\n")
         } else {
@@ -165,7 +165,7 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
             "  - name: {name}\n    language: iac\n    root: .\n    manifest: Pulumi.yaml\n"
         ));
     }
-    workspaces
+    Ok(workspaces)
 }
 
 fn node_workspace_name(root: &str) -> String {
@@ -210,9 +210,9 @@ fn synthesize_tasks(source_path: &Utf8Path, workspaces: &[String]) -> Result<Str
         for spec in specs {
             let commands = match spec.language.as_str() {
                 "rust" => vec![
-                    ("check", "cargo check".to_string()),
-                    ("test", "cargo test".to_string()),
-                    ("build", "cargo build".to_string()),
+                    ("check", "cargo check --workspace".to_string()),
+                    ("test", "cargo test --workspace".to_string()),
+                    ("build", "cargo build --workspace".to_string()),
                 ],
                 "python" => vec![("check", "uv run python -m compileall -q .".to_string())],
                 "typescript" => node_tasks(source_path, &spec)?,
@@ -307,32 +307,6 @@ pub(super) fn append_node_build_verification(
                 ["run", "build"],
             ));
         }
-    }
-    Ok(())
-}
-
-pub(super) fn append_rust_verification(
-    destination: &Utf8Path,
-    source: &AdoptedSource,
-    commands: &mut Vec<ProcessCommand>,
-) -> Result<(), RepoctlError> {
-    for manifest in source
-        .inventory
-        .manifests
-        .iter()
-        .filter(|path| path.ends_with("Cargo.toml"))
-    {
-        let root = manifest.strip_suffix("/Cargo.toml").unwrap_or(".");
-        let cwd = source
-            .destination_path
-            .join_project(&ProjectRelativePath::new(root).map_err(RepoctlError::diagnostic)?)
-            .map_err(RepoctlError::diagnostic)?;
-        commands.push(process_command(
-            destination,
-            &cwd,
-            "cargo",
-            ["check", "--workspace", "--all-features"],
-        ));
     }
     Ok(())
 }

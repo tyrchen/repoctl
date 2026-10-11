@@ -19,6 +19,7 @@ mod node;
 mod packages;
 mod placement;
 mod rewrites;
+mod rust;
 mod source_walk;
 mod synthesis;
 
@@ -158,6 +159,7 @@ pub(super) fn plan_adoption(
         &dest_root,
         request.verification.clone(),
         &source_plan.sources,
+        &source_plan.manifest_syntheses,
     )?;
 
     let plan = AdoptionPlan {
@@ -342,6 +344,7 @@ fn adoption_verification_plan(
     dest_root: &Utf8Path,
     mode: ValidationMode,
     sources: &[AdoptedSource],
+    syntheses: &[ProjectManifestSynthesis],
 ) -> Result<VerificationPlan, RepoctlError> {
     let mut prerequisites = BTreeMap::new();
     for source in sources.iter().filter(|source| !source.skipped) {
@@ -375,7 +378,7 @@ fn adoption_verification_plan(
     }
     if mode == ValidationMode::Full {
         for source in sources.iter().filter(|source| !source.skipped) {
-            synthesis::append_rust_verification(dest_root, source, &mut commands)?;
+            rust::append_verification(dest_root, source, syntheses, &mut commands)?;
             synthesis::append_node_build_verification(dest_root, source, &mut commands)?;
         }
     }
