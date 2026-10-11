@@ -4,7 +4,8 @@ repoctl connects ownership, architecture, local checks, CI and agent context thr
 one repository graph. Cargo, Node and Python discovery is offline by default. Use
 `graph validate --mode full` when Cargo metadata resolution is explicitly needed.
 Doctor shares one immutable snapshot between its sections and refreshes it on the
-next invocation.
+next invocation. Node/Python package indexes and parsed manifests are shared
+within each graph construction and reread on the next construction.
 
 ## Change selection and execution
 
@@ -23,7 +24,8 @@ include transitive owners. Unowned changes emit a warning.
 Tasks run only when every prerequisite succeeds. Multiple commands for the same
 project/workspace/task execute sequentially, in manifest order. Independent ready
 tasks can run concurrently; failure skips descendants and continues independent
-branches. Missing prerequisites and cycles are errors. Concurrency is 1–256.
+branches. Missing prerequisites and cycles are errors. Concurrency is 1–256. The distinct
+prerequisite union per task identity is capped at 256 before dependency expansion.
 
 Commands use argv with null stdin. Default limits are 300 seconds and 1 MiB for
 each output stream. Configure `timeout_seconds` (1–86400) and `max_output_bytes`
@@ -106,7 +108,9 @@ repoctl ci run-step --project apps.catalog --workspace web --task check --instal
 
 Generated workflows have graph, task-matrix and required jobs, full Git history,
 explicit refs and independent pinned CLI installation. They install the selected
-toolchains/dependencies and execute tasks with their prerequisites. Dependency
+toolchains/dependencies and execute tasks with their prerequisites. Matrix rows
+include only originally selected tasks; prerequisite-only tasks run within their
+dependent job, while setup metadata includes the full closure. Dependency
 installation is explicit through `--install`; local graph discovery never installs
 packages. Frozen/locked installation is used when a corresponding lockfile exists.
 Empty matrices intentionally skip task jobs; cancellation/failure never passes the

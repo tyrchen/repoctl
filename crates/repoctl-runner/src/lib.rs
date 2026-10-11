@@ -286,7 +286,7 @@ impl RunnerService {
         } else {
             None
         };
-        let commands = plan_task_commands(
+        let (commands, selected_tasks) = plan_task_commands(
             &snapshot,
             request,
             affected.as_ref(),
@@ -296,6 +296,7 @@ impl RunnerService {
             cache::validate_outputs(command, &snapshot)?;
         }
         Ok(TaskRunPlan {
+            selected_tasks,
             commands,
             concurrency: std::num::NonZeroUsize::new(
                 request.concurrency.map_or(1, std::num::NonZeroU32::get) as usize,
@@ -449,14 +450,7 @@ impl RunnerService {
             .discover(&repoctl_core::DiscoverRequest {
                 repo: request.repo.clone(),
             })?;
-        let mut seen = BTreeSet::new();
-        let mut entries = Vec::new();
-        for command in &plan.commands {
-            let id = (&command.project, &command.workspace, &command.task);
-            if seen.insert(id) {
-                entries.push(ci::entry(command, &plan.commands, &snapshot)?);
-            }
-        }
+        let entries = ci::entries(&plan, &snapshot)?;
         let github_actions = if entries.is_empty() {
             json!({ "include": [] })
         } else {
@@ -489,14 +483,7 @@ impl RunnerService {
             .discover(&repoctl_core::DiscoverRequest {
                 repo: request.repo.clone(),
             })?;
-        let mut seen = BTreeSet::new();
-        let mut entries = Vec::new();
-        for command in &plan.commands {
-            let id = (&command.project, &command.workspace, &command.task);
-            if seen.insert(id) {
-                entries.push(ci::entry(command, &plan.commands, &snapshot)?);
-            }
-        }
+        let entries = ci::entries(&plan, &snapshot)?;
         Ok(CiMatrixReport {
             github_actions: json!({ "include": entries.clone() }),
             entries,

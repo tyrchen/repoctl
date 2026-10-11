@@ -46,7 +46,9 @@ is added to local discovery. Mermaid is a portable graph artifact, not a hosted 
 Task identity is `(project, workspace, task)`. A node owns all matching commands in
 manifest order and the union of their declared prerequisites. Planning recursively
 resolves nodes, rejects cycles/missing nodes, and returns stable topological order.
-Dependency depth and prerequisites per command are bounded to 256.
+Dependency depth, prerequisites per command, and the distinct prerequisite union
+per task identity are bounded to 256. Reject an oversized union before expanding
+any prerequisite or cloning it into process commands.
 Concurrency limits (1..=256) apply to ready nodes; commands inside a node run sequentially.
 Independent tasks continue after another branch fails; descendants are skipped.
 Reports remain in plan order, regardless of completion order. Process adapter errors
@@ -110,13 +112,16 @@ Local inspectors read bounded manifests and map dependency package names/paths t
 declared workspaces. Node handles dependencies/dev/peer/optional sections, workspace
 protocols and file/link paths. Python handles PEP 621 dependencies, optional groups,
 uv path sources and Poetry path dependencies; normalized distribution names are
-case-insensitive and treat dash/underscore/dot equally. Cargo preserves the existing
-metadata inspector for explicit full verification and adds an offline TOML path
+case-insensitive and treat dash/underscore/dot equally. Build package-name indexes
+and parsed Node/Python manifests once per graph construction; reuse them for all
+matching workspace inspections and discard them before the next construction.
+Cargo preserves the existing metadata inspector for explicit full verification and adds an offline TOML path
 inspector. Unknown external dependencies are not internal edges. Ambiguous local
 names and malformed manifests are diagnostics, not ignored success.
 
 An affected reason records source, target, reason and optional edge kind/evidence.
-Reverse traversal uses a queue and all project dependency surfaces. Reviewers come from the union of directly/transitively affected projects; risk
+Reverse traversal uses a queue and all project dependency surfaces. Reviewers come
+from the union of directly/transitively affected projects; risk
 flags identify changed shared-infrastructure and production-IaC paths. Unowned
 changed files produce a diagnostic instead of silently hiding a selection gap.
 
@@ -134,7 +139,10 @@ matrix with project/workspace/task/toolchain/cwd/installation metadata. Each job
 installs repoctl independently. Install Cargo/Node/Bun/uv and protobuf/Buf only when
 needed; frozen/locked installation is used when the corresponding lockfile exists.
 Execute `ci run-step`, resolving prerequisite tasks in the same runner so artifacts
-are available; use one matrix entry per task identity.
+are available; use one matrix entry per originally selected task identity.
+Prerequisite-only
+identities execute inside their dependent job and receive no additional matrix
+row; setup metadata still includes the full prerequisite closure.
 
 PRs use base SHA/head SHA; pushes use `before`/head, with all-project fallback for a
 missing first-push base. Matrix data goes through JSON/env arguments, never unchecked

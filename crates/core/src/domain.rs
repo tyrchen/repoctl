@@ -1910,6 +1910,9 @@ pub struct TaskRunRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRunPlan {
+    /// Originally selected task identities, excluding prerequisite-only tasks.
+    #[serde(default)]
+    pub selected_tasks: Vec<TaskDependency>,
     /// Planned process commands.
     pub commands: Vec<ProcessCommand>,
     /// Maximum concurrency.

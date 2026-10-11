@@ -10,9 +10,33 @@ use std::{
 
 use repoctl_core::{
     ProcessCommand, ProcessOutput, ProcessRunner, RepoRelativePath, RepoSnapshot, RepoctlError,
-    TaskExecutionOptions, Toolchain, WorkspaceLanguage,
+    TaskDependency, TaskExecutionOptions, TaskRunPlan, Toolchain, WorkspaceLanguage,
 };
 use serde_json::{Value, json};
+
+pub(super) fn entries(
+    plan: &TaskRunPlan,
+    snapshot: &RepoSnapshot,
+) -> Result<Vec<Value>, RepoctlError> {
+    let selected = plan.selected_tasks.iter().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut entries = Vec::new();
+    for command in &plan.commands {
+        if let (Some(project), Some(workspace), Some(task)) =
+            (&command.project, &command.workspace, &command.task)
+        {
+            let id = TaskDependency {
+                project: project.clone(),
+                workspace: workspace.clone(),
+                task: task.clone(),
+            };
+            if selected.contains(&id) && seen.insert(id) {
+                entries.push(entry(command, &plan.commands, snapshot)?);
+            }
+        }
+    }
+    Ok(entries)
+}
 
 pub(super) fn entry(
     command: &ProcessCommand,

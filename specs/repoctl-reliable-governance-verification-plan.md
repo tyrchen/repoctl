@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 104 regular tests and five doctests. The separately
+The workspace suite contains 107 regular tests and six doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -77,6 +77,40 @@ from 2673 to 2359. CLI dispatch grows from 642 to 676 lines. No thresholds or
 exclusions were changed to hide findings. Existing dispatcher/model size remains
 explicit maintenance debt; this PR does not claim the entire source tree meets the
 default size policy.
+
+## PR review follow-up
+
+All three review findings are valid and fixed:
+
+- CI planning retains typed `selected_tasks` separately from the command closure.
+  Both affected and fallback-all matrices emit only originally selected identities;
+  toolchain metadata and execution still include prerequisites. The new CLI
+  regression verifies same-name prerequisites in an unaffected project, two-command
+  preparation, exactly one affected row, correct toolchain flags, and execution
+  counts. Independently selected tasks remain rows in the fallback-all case.
+- The graph builder uses `WorkspaceInspector::inspect_all`; existing adapters retain
+  their default per-workspace implementation. Node/Python overrides prepare name
+  indexes and parsed manifests once per construction, without a global cache. An
+  instrumented real-filesystem test checks exactly 32 reads for 32 packages, then
+  checks 64 cumulative reads and updated edges after editing a manifest and
+  rebuilding with the same builder.
+- Task planning rejects more than 256 distinct prerequisites across all commands
+  of a task identity, before dependency expansion or cloning. Boundary tests use
+  individually valid commands with repeated prerequisites: 256 distinct targets
+  plan successfully; 257 fail with `task.too_many_prerequisites` before resolving
+  a deliberately missing target.
+
+Regression code lives in [review.rs](../apps/repoctl-cli/tests/regressions/review.rs)
+and the package inspector's [unit tests](../crates/repoctl-engine/src/local_inspectors/packages.rs).
+Build, workspace tests, nightly formatting and strict pedantic clippy pass.
+Follow-up doctor/size verification uses the same temporary managed fixture and
+explicit changed paths: graph and other health sections are clear; doctor reports
+four inherited size warnings in core domain and runner roots (including the two
+unchanged provider-capability blocks). The focused eight-file scan has no findings;
+the all-source count remains 13. No threshold was relaxed. Audit/deny and real Buf
+need no additional local run for this source-only follow-up: dependencies, lockfiles,
+release packaging and proto/process execution are unchanged; hosted CI still runs
+its complete Rust/Buf gate.
 
 ## Release boundaries and skipped gates
 

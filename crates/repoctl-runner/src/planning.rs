@@ -16,7 +16,7 @@ pub(super) fn plan_task_commands(
     request: &TaskRunRequest,
     affected: Option<&AffectedReport>,
     toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
-) -> Result<Vec<ProcessCommand>, RepoctlError> {
+) -> Result<(Vec<ProcessCommand>, Vec<TaskDependency>), RepoctlError> {
     let affected_projects = affected.map(|report| {
         report
             .directly_affected
@@ -51,6 +51,11 @@ pub(super) fn plan_task_commands(
                 {
                     continue;
                 }
+                state.selected.insert(TaskDependency {
+                    project: project.name.clone(),
+                    workspace: task_command.workspace.clone(),
+                    task: task.clone(),
+                });
                 append_task_command_with_dependencies(
                     snapshot,
                     project,
@@ -58,16 +63,17 @@ pub(super) fn plan_task_commands(
                     task_command,
                     toolchain_adapters,
                     &mut state,
-                );
+                )?;
             }
         }
     }
-    state.commands.into_iter().collect()
+    Ok((state.commands, state.selected.into_iter().collect()))
 }
 
 #[derive(Debug, Default)]
 struct TaskPlanState {
-    commands: Vec<Result<ProcessCommand, RepoctlError>>,
+    commands: Vec<ProcessCommand>,
+    selected: BTreeSet<TaskDependency>,
     seen: BTreeSet<(ProjectName, WorkspaceName, TaskName)>,
     stack: BTreeSet<(ProjectName, WorkspaceName, TaskName)>,
 }
@@ -79,30 +85,26 @@ fn append_task_command_with_dependencies(
     task_command: &TaskCommand,
     toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
     state: &mut TaskPlanState,
-) {
+) -> Result<(), RepoctlError> {
     let key = (
         project.name.clone(),
         task_command.workspace.clone(),
         task.clone(),
     );
     if state.seen.contains(&key) {
-        return;
+        return Ok(());
     }
     if state.stack.len() >= 256 {
-        state
-            .commands
-            .push(Err(RepoctlError::diagnostic(Diagnostic::error(
-                "task.dependency_depth",
-                "task dependency depth exceeds 256",
-            ))));
-        return;
+        return Err(RepoctlError::diagnostic(Diagnostic::error(
+            "task.dependency_depth",
+            "task dependency depth exceeds 256",
+        )));
     }
     if !state.stack.insert(key.clone()) {
-        state.commands.push(Err(RepoctlError::diagnostic(
+        return Err(RepoctlError::diagnostic(
             Diagnostic::error("task.dependency_cycle", "task prerequisite cycle detected")
                 .with_project(project.name.as_str()),
-        )));
-        return;
+        ));
     }
     let commands = project
         .tasks
@@ -111,28 +113,44 @@ fn append_task_command_with_dependencies(
         .flatten()
         .filter(|command| command.workspace == task_command.workspace)
         .collect::<Vec<_>>();
-    let mut prerequisites = BTreeSet::new();
-    for command in &commands {
-        for dependency in &command.depends_on {
-            prerequisites.insert(format!(
-                "{}:{}:{}",
-                dependency.project, dependency.workspace, dependency.task
-            ));
-            append_task_dependency(snapshot, dependency, toolchain_adapters, state);
-        }
+    let dependencies = task_prerequisites(&commands, project)?;
+    let mut prerequisites = Vec::new();
+    for dependency in dependencies {
+        prerequisites.push(format!(
+            "{}:{}:{}",
+            dependency.project, dependency.workspace, dependency.task
+        ));
+        append_task_dependency(snapshot, &dependency, toolchain_adapters, state)?;
     }
     for command in commands {
-        state.commands.push(
-            build_process_command(snapshot, project, task, command, toolchain_adapters).map(
-                |mut command| {
-                    command.prerequisites = prerequisites.iter().cloned().collect();
-                    command
-                },
-            ),
-        );
+        let mut command =
+            build_process_command(snapshot, project, task, command, toolchain_adapters)?;
+        command.prerequisites.clone_from(&prerequisites);
+        state.commands.push(command);
     }
     state.seen.insert(key.clone());
     state.stack.remove(&key);
+    Ok(())
+}
+
+fn task_prerequisites(
+    commands: &[&TaskCommand],
+    project: &ProjectManifest,
+) -> Result<BTreeSet<TaskDependency>, RepoctlError> {
+    let mut dependencies = BTreeSet::new();
+    for dependency in commands.iter().flat_map(|command| &command.depends_on) {
+        dependencies.insert(dependency.clone());
+        if dependencies.len() > 256 {
+            return Err(RepoctlError::diagnostic(
+                Diagnostic::error(
+                    "task.too_many_prerequisites",
+                    "task prerequisite union exceeds 256",
+                )
+                .with_project(project.name.as_str()),
+            ));
+        }
+    }
+    Ok(dependencies)
 }
 
 fn append_task_dependency(
@@ -140,9 +158,9 @@ fn append_task_dependency(
     dependency: &TaskDependency,
     toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
     state: &mut TaskPlanState,
-) {
-    let Some(project) = snapshot.project(&dependency.project) else {
-        state.commands.push(Err(RepoctlError::diagnostic(
+) -> Result<(), RepoctlError> {
+    let project = snapshot.project(&dependency.project).ok_or_else(|| {
+        RepoctlError::diagnostic(
             Diagnostic::error(
                 "task.dependency_project_missing",
                 format!(
@@ -151,11 +169,10 @@ fn append_task_dependency(
                 ),
             )
             .with_project(dependency.project.as_str()),
-        )));
-        return;
-    };
-    let Some(task_commands) = project.tasks.get(&dependency.task) else {
-        state.commands.push(Err(RepoctlError::diagnostic(
+        )
+    })?;
+    let task_commands = project.tasks.get(&dependency.task).ok_or_else(|| {
+        RepoctlError::diagnostic(
             Diagnostic::error(
                 "task.dependency_task_missing",
                 format!(
@@ -164,33 +181,31 @@ fn append_task_dependency(
                 ),
             )
             .with_project(project.name.as_str()),
-        )));
-        return;
-    };
-    for task_command in task_commands {
-        if task_command.workspace != dependency.workspace {
-            continue;
-        }
-        append_task_command_with_dependencies(
-            snapshot,
-            project,
-            &dependency.task,
-            task_command,
-            toolchain_adapters,
-            state,
-        );
-        return;
-    }
-    state.commands.push(Err(RepoctlError::diagnostic(
-        Diagnostic::error(
-            "task.dependency_workspace_missing",
-            format!(
-                "task prerequisite references missing workspace `{}`",
-                dependency.workspace
-            ),
         )
-        .with_project(project.name.as_str()),
-    )));
+    })?;
+    let task_command = task_commands
+        .iter()
+        .find(|command| command.workspace == dependency.workspace)
+        .ok_or_else(|| {
+            RepoctlError::diagnostic(
+                Diagnostic::error(
+                    "task.dependency_workspace_missing",
+                    format!(
+                        "task prerequisite references missing workspace `{}`",
+                        dependency.workspace
+                    ),
+                )
+                .with_project(project.name.as_str()),
+            )
+        })?;
+    append_task_command_with_dependencies(
+        snapshot,
+        project,
+        &dependency.task,
+        task_command,
+        toolchain_adapters,
+        state,
+    )
 }
 
 fn build_process_command(

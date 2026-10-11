@@ -3,6 +3,8 @@
 
 //! Offline package dependency discovery without registry access or package-manager execution.
 
+mod packages;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -10,9 +12,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use packages::{PackageIndex, PackageManifest, inspect_packages, package_index};
 use repoctl_core::{
-    Diagnostic, DiscoveredEdge, RepoRelativePath, RepoctlError, WorkspaceInspectionInput,
-    WorkspaceInspector, WorkspaceLanguage,
+    Diagnostic, DiscoveredEdge, GraphBuildInput, RepoRelativePath, RepoctlError,
+    WorkspaceInspectionInput, WorkspaceInspector, WorkspaceLanguage,
 };
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
@@ -70,38 +73,50 @@ impl WorkspaceInspector for NodeWorkspaceInspector {
         &self,
         input: &WorkspaceInspectionInput<'_>,
     ) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
-        let path = manifest_path(input)?;
-        let Some(text) = read_manifest(&path, input.root.absolute.as_std_path())? else {
-            return Ok(Vec::new());
-        };
-        let doc: Value = serde_json::from_str(&text)
-            .map_err(|error| manifest_error(&path, &error.to_string()))?;
-        let names = package_index(input, &WorkspaceLanguage::TypeScript)?;
-        let mut edges = Vec::new();
-        for section in [
-            "dependencies",
-            "devDependencies",
-            "peerDependencies",
-            "optionalDependencies",
-        ] {
-            if let Some(deps) = doc.get(section).and_then(Value::as_object) {
-                for (name, version) in deps {
-                    let version = version.as_str().ok_or_else(|| {
-                        manifest_error(&path, "dependency versions must be strings")
-                    })?;
-                    if let Some(local) = version
-                        .strip_prefix("file:")
-                        .or_else(|| version.strip_prefix("link:"))
-                    {
-                        append_path_edge(input, &path, local, name, &mut edges)?;
-                    } else if let Some(target) = names.get(name) {
-                        append_target_edge(input, target, &path, name, &mut edges);
-                    }
+        let index = package_index(
+            input.root,
+            input.projects,
+            &self.language(),
+            &mut read_manifest,
+        )?;
+        inspect_indexed(input, &index)
+    }
+
+    fn inspect_all(&self, input: &GraphBuildInput) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
+        inspect_packages(input, &self.language(), &mut read_manifest)
+    }
+}
+
+fn node_edges(
+    input: &WorkspaceInspectionInput<'_>,
+    path: &Path,
+    doc: &Value,
+    names: &BTreeMap<String, RepoRelativePath>,
+) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
+    let mut edges = Vec::new();
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(deps) = doc.get(section).and_then(Value::as_object) {
+            for (name, version) in deps {
+                let version = version
+                    .as_str()
+                    .ok_or_else(|| manifest_error(path, "dependency versions must be strings"))?;
+                if let Some(local) = version
+                    .strip_prefix("file:")
+                    .or_else(|| version.strip_prefix("link:"))
+                {
+                    append_path_edge(input, path, local, name, &mut edges)?;
+                } else if let Some(target) = names.get(name) {
+                    append_target_edge(input, target, path, name, &mut edges);
                 }
             }
         }
-        Ok(edges)
     }
+    Ok(edges)
 }
 
 /// Python distribution and local-source inspection for PEP 621, uv and Poetry.
@@ -117,46 +132,59 @@ impl WorkspaceInspector for PythonWorkspaceInspector {
         &self,
         input: &WorkspaceInspectionInput<'_>,
     ) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
-        let path = manifest_path(input)?;
-        let Some(text) = read_manifest(&path, input.root.absolute.as_std_path())? else {
-            return Ok(Vec::new());
-        };
-        let doc = parse_toml(&text, &path)?;
-        let names = package_index(input, &WorkspaceLanguage::Python)?;
-        let mut edges = Vec::new();
-        if let Some(deps) = doc.get("project").and_then(|p| p.get("dependencies")) {
-            python_requirements(input, deps, &names, &path, &mut edges)?;
+        let index = package_index(
+            input.root,
+            input.projects,
+            &self.language(),
+            &mut read_manifest,
+        )?;
+        inspect_indexed(input, &index)
+    }
+
+    fn inspect_all(&self, input: &GraphBuildInput) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
+        inspect_packages(input, &self.language(), &mut read_manifest)
+    }
+}
+
+fn python_edges(
+    input: &WorkspaceInspectionInput<'_>,
+    path: &Path,
+    doc: &DocumentMut,
+    names: &BTreeMap<String, RepoRelativePath>,
+) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
+    let mut edges = Vec::new();
+    if let Some(deps) = doc.get("project").and_then(|p| p.get("dependencies")) {
+        python_requirements(input, deps, names, path, &mut edges)?;
+    }
+    if let Some(groups) = doc
+        .get("project")
+        .and_then(|p| p.get("optional-dependencies"))
+        .and_then(Item::as_table_like)
+    {
+        for (_, deps) in groups.iter() {
+            python_requirements(input, deps, names, path, &mut edges)?;
         }
-        if let Some(groups) = doc
-            .get("project")
-            .and_then(|p| p.get("optional-dependencies"))
-            .and_then(Item::as_table_like)
-        {
-            for (_, deps) in groups.iter() {
-                python_requirements(input, deps, &names, &path, &mut edges)?;
-            }
+    }
+    if let Some(groups) = doc.get("dependency-groups").and_then(Item::as_table_like) {
+        for (_, deps) in groups.iter() {
+            python_requirements(input, deps, names, path, &mut edges)?;
         }
-        if let Some(groups) = doc.get("dependency-groups").and_then(Item::as_table_like) {
-            for (_, deps) in groups.iter() {
-                python_requirements(input, deps, &names, &path, &mut edges)?;
-            }
-        }
-        for parts in [
-            ["tool", "uv", "sources"],
-            ["tool", "poetry", "dependencies"],
-        ] {
-            if let Some(deps) = toml_path(doc.as_item(), &parts).and_then(Item::as_table_like) {
-                for (name, source) in deps.iter() {
-                    if let Some(local) = source.get("path").and_then(Item::as_str) {
-                        append_path_edge(input, &path, local, name, &mut edges)?;
-                    } else if let Some(target) = names.get(&normalize_python_name(name)) {
-                        append_target_edge(input, target, &path, name, &mut edges);
-                    }
+    }
+    for parts in [
+        ["tool", "uv", "sources"],
+        ["tool", "poetry", "dependencies"],
+    ] {
+        if let Some(deps) = toml_path(doc.as_item(), &parts).and_then(Item::as_table_like) {
+            for (name, source) in deps.iter() {
+                if let Some(local) = source.get("path").and_then(Item::as_str) {
+                    append_path_edge(input, path, local, name, &mut edges)?;
+                } else if let Some(target) = names.get(&normalize_python_name(name)) {
+                    append_target_edge(input, target, path, name, &mut edges);
                 }
             }
         }
-        Ok(edges)
     }
+    Ok(edges)
 }
 
 fn python_requirements(
@@ -181,54 +209,16 @@ fn python_requirements(
     Ok(())
 }
 
-fn package_index(
+fn inspect_indexed(
     input: &WorkspaceInspectionInput<'_>,
-    language: &WorkspaceLanguage,
-) -> Result<BTreeMap<String, RepoRelativePath>, RepoctlError> {
-    let mut names = BTreeMap::new();
-    for project in input.projects {
-        for workspace in project
-            .workspaces
-            .iter()
-            .filter(|w| &w.language == language)
-        {
-            let rel = project
-                .path
-                .join_project(&workspace.manifest)
-                .map_err(RepoctlError::diagnostic)?;
-            let path = input.root.join(&rel);
-            let Some(text) = read_manifest(path.as_std_path(), input.root.absolute.as_std_path())?
-            else {
-                continue;
-            };
-            let name = if *language == WorkspaceLanguage::TypeScript {
-                let doc: Value = serde_json::from_str(&text)
-                    .map_err(|error| manifest_error(path.as_std_path(), &error.to_string()))?;
-                doc.get("name")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            } else {
-                let doc = parse_toml(&text, path.as_std_path())?;
-                toml_path(doc.as_item(), &["project", "name"])
-                    .or_else(|| toml_path(doc.as_item(), &["tool", "poetry", "name"]))
-                    .and_then(Item::as_str)
-                    .map(normalize_python_name)
-            };
-            if let Some(name) = name {
-                let target = project
-                    .path
-                    .join_project(&workspace.root)
-                    .map_err(RepoctlError::diagnostic)?;
-                if names.insert(name.clone(), target).is_some() {
-                    return Err(manifest_error(
-                        path.as_std_path(),
-                        &format!("ambiguous local package `{name}`"),
-                    ));
-                }
-            }
-        }
+    index: &PackageIndex,
+) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
+    let path = manifest_path(input)?;
+    match index.documents.get(&path) {
+        Some(PackageManifest::Node(doc)) => node_edges(input, &path, doc, &index.names),
+        Some(PackageManifest::Python(doc)) => python_edges(input, &path, doc, &index.names),
+        None => Ok(Vec::new()),
     }
-    Ok(names)
 }
 
 fn normalize_python_name(name: &str) -> String {

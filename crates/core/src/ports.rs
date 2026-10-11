@@ -198,6 +198,40 @@ pub trait WorkspaceInspector: Send + Sync {
         &self,
         input: &WorkspaceInspectionInput<'_>,
     ) -> Result<Vec<DiscoveredEdge>, RepoctlError>;
+
+    /// Inspects all matching workspaces within one graph construction.
+    ///
+    /// Adapters may override this to prepare command-scoped package indexes.
+    /// The default preserves existing per-workspace adapters without shared state.
+    ///
+    /// ```
+    /// use repoctl_core::{GraphBuildInput, RepoctlError, WorkspaceInspector};
+    /// fn count_dependencies(
+    ///     inspector: &dyn WorkspaceInspector,
+    ///     input: &GraphBuildInput,
+    /// ) -> Result<usize, RepoctlError> {
+    ///     Ok(inspector.inspect_all(input)?.len())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns the first workspace inspection error.
+    fn inspect_all(&self, input: &GraphBuildInput) -> Result<Vec<DiscoveredEdge>, RepoctlError> {
+        let mut edges = Vec::new();
+        for project in &input.projects {
+            for workspace in &project.workspaces {
+                if workspace.language == self.language() {
+                    edges.extend(self.inspect(&WorkspaceInspectionInput {
+                        root: &input.root,
+                        projects: &input.projects,
+                        project,
+                        workspace,
+                    })?);
+                }
+            }
+        }
+        Ok(edges)
+    }
 }
 
 /// Context passed to policy rules.

@@ -2,6 +2,7 @@
 
 mod buf_contract;
 mod contracts;
+mod review;
 
 use std::{fs, process::Command};
 
