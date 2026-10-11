@@ -165,6 +165,16 @@ After `adopt apply`, run these commands in their declared directories, commit th
 regenerated locks, then run `adopt verify`; missing required locks fail verification.
 Apply executes file operations only. Planning and apply preflight reject existing
 project.yaml/project.yml, other file conflicts and duplicate output paths.
+A destination nested in the source is excluded from discovery and copying. Source
+and destination cannot be identical. Migration caps selected files/final operations
+at 20,000, entries at 100,000, candidates at 256 and depth at 64; inspected text is
+limited to 256 KiB per file and 64 MiB total. Oversized sources fail explicitly.
+Saved `--ci report-only` plans retain a workflow preview without writing it during
+apply; use `--ci update` to write the generated workflow.
+Legacy `bun.lockb` selects Bun and is preserved as binary data. When dependencies
+are rewritten, the explicit refresh creates `bun.lock` and generated project
+manifests use that new text lockfile.
+
 
 Rust request/command structs gained execution/cache/context/proto options; the
 workspace version is bumped to 0.7.0 for these API changes. Prefer default request

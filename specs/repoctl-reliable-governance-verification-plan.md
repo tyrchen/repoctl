@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 118 regular tests and eight doctests. The separately
+The workspace suite contains 125 regular tests and eight doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -192,3 +192,35 @@ pedantic clippy pass. Doctor and changed-source size checks pass in the managed
 fixture with zero findings across 11 changed Rust files. The all-source scan still
 has 13 pre-existing warnings. Dependencies and release packaging did not change;
 audit/deny were not repeated. Real Buf remains exercised by hosted CI.
+
+
+## Adoption containment and limits review follow-up
+
+Four further findings are valid and fixed. Four end-to-end tests in
+[adoption safety](../apps/repoctl-cli/tests/regressions/adoption_safety.rs) and three
+unit tests in [source traversal](../crates/repoctl/src/adoption/source_walk.rs) cover:
+
+- Canonical root aliases, identical-root rejection and nested destination pruning
+  for both a repository collection and a direct source repository. A malformed
+  destination package manifest is ignored throughout inventory, indexing and copy;
+  application succeeds without recursive destination imports.
+- Saved report-only CI previews preserve existing workflows and absent workflows;
+  `off` emits no operations and `update` applies the generated workflow.
+- Non-UTF-8 `bun.lockb` data selects Bun for the owning root and child packages,
+  survives unchanged copying, and never enters dependency text parsing. A rewritten
+  child triggers one explicit text-lock refresh with `--save-text-lockfile`, updates
+  every synthesized lockfile path, and requires the new `bun.lock` before verification.
+  This follows Bun's [documented migration flag](https://bun.com/docs/pm/lockfile).
+- Inventory and copy budgets carry across sources. Tests seed counters near their
+  limits and traverse real files to exercise the boundary without creating a huge
+  fixture. Directory-entry, depth, per-text-file and aggregate-text bounds are
+  enforced before visiting/parsing. An oversized saved operation list fails before
+  any destination file is created.
+
+Build, 125 workspace tests, eight doctests, 125 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. Doctor and changed-source size
+checks pass in the managed fixture with zero findings across 11 changed Rust files.
+The all-source scan retains its 13 existing warnings; no thresholds were relaxed.
+Dependencies, release packaging, agent instructions and Buf execution are unchanged,
+so audit/deny, agent sync and the separate local real-Buf gate were not repeated.
+Hosted CI continues to exercise real Buf.

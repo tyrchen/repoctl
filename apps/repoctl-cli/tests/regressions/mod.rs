@@ -2,6 +2,7 @@
 
 mod adoption_execution;
 mod adoption_review;
+mod adoption_safety;
 mod buf_contract;
 mod cache_dependencies;
 mod contracts;

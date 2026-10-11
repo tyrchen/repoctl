@@ -1,6 +1,6 @@
 //! Package indexing and option-preserving local dependency rewrites.
 
-use std::{collections::BTreeMap, fs};
+use std::collections::BTreeMap;
 
 use camino::Utf8Path;
 use repoctl_core::{
@@ -10,7 +10,9 @@ use repoctl_core::{
 use serde_json::Value;
 use toml_edit::{DocumentMut, InlineTable, Item, Value as TomlValue, value};
 
-use super::{packages::PackageIndex, synthesis::project_name_for_destination};
+use super::{
+    packages::PackageIndex, source_walk::read_text, synthesis::project_name_for_destination,
+};
 
 pub(super) fn plan_dependency_rewrites(
     sources: &[AdoptedSource],
@@ -18,15 +20,19 @@ pub(super) fn plan_dependency_rewrites(
 ) -> Result<Vec<DependencyRewrite>, RepoctlError> {
     let mut rewrites = Vec::new();
     for source in sources.iter().filter(|source| !source.skipped) {
-        for manifest in &source.inventory.manifests {
+        for manifest in source
+            .inventory
+            .manifests
+            .iter()
+            .filter(|path| path.ends_with("Cargo.toml") || path.ends_with("package.json"))
+        {
             let file = source
                 .destination_path
                 .join_project(
                     &ProjectRelativePath::new(manifest).map_err(RepoctlError::diagnostic)?,
                 )
                 .map_err(RepoctlError::diagnostic)?;
-            let content = fs::read_to_string(source.source_path.join(manifest))
-                .map_err(|error| RepoctlError::Environment(error.to_string()))?;
+            let content = read_text(&source.source_path.join(manifest))?;
             let owner_project =
                 project_name_for_destination(&source.destination_path, &source.inferred_kind)?;
             if manifest.ends_with("Cargo.toml") {
@@ -133,8 +139,7 @@ fn validate_workspace_inheritance(
         }
         let cargo = path.join("Cargo.toml");
         if cargo.is_file() {
-            let text = fs::read_to_string(&cargo)
-                .map_err(|error| RepoctlError::io(cargo.clone(), error))?;
+            let text = read_text(&cargo)?;
             let document = text
                 .parse::<DocumentMut>()
                 .map_err(|error| RepoctlError::Environment(error.to_string()))?;
@@ -205,8 +210,7 @@ pub(super) fn apply_rewrites_to_operations(
         let Some(source_path) = &operation.source_path else {
             continue;
         };
-        let content = fs::read_to_string(source_path)
-            .map_err(|source| RepoctlError::io(source_path.clone(), source))?;
+        let content = read_text(source_path)?;
         let rewritten = if file.as_str().ends_with("Cargo.toml") {
             rewrite_cargo_manifest(&content, &file_rewrites)?
         } else if file.as_str().ends_with("package.json") {

@@ -7,10 +7,13 @@ use repoctl_core::{Diagnostic, RepoctlError, SourceInventory};
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 
-use super::ADOPTION_EXCLUDED_DIRS;
+use super::source_walk::{
+    MAX_SOURCES, ScanBudget, SourceEntry, SourceEntryKind, limit, read_text, walk_source,
+};
 
 pub(super) fn source_repositories(
     source_root: &Utf8Path,
+    dest_root: &Utf8Path,
 ) -> Result<Vec<Utf8PathBuf>, RepoctlError> {
     if source_root.join("Cargo.toml").is_file()
         || source_root.join("pyproject.toml").is_file()
@@ -21,6 +24,7 @@ pub(super) fn source_repositories(
         return Ok(vec![source_root.to_path_buf()]);
     }
     let mut repos = Vec::new();
+    let mut budget = ScanBudget::default();
     let entries = fs::read_dir(source_root)
         .map_err(|source| RepoctlError::io(source_root.to_path_buf(), source))?;
     for entry in entries {
@@ -31,6 +35,16 @@ pub(super) fn source_repositories(
                 format!("path is not valid UTF-8: {}", path.display()),
             ))
         })?;
+        if dest_root.starts_with(source_root) && path.starts_with(dest_root) {
+            continue;
+        }
+        budget.visit(&path, false, 1)?;
+        if path.is_symlink() {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.copy.symlink",
+                format!("adoption source contains a symlink: {path}"),
+            )));
+        }
         if path.is_dir()
             && (path.join("Cargo.toml").is_file()
                 || path.join("pyproject.toml").is_file()
@@ -39,6 +53,9 @@ pub(super) fn source_repositories(
                 || path.join("Pulumi.yaml").is_file()
                 || path.join("README.md").is_file())
         {
+            if repos.len() >= MAX_SOURCES {
+                return Err(limit("sources", &path));
+            }
             repos.push(path);
         }
     }
@@ -55,114 +72,76 @@ pub(super) fn source_name(path: &Utf8Path) -> Result<String, RepoctlError> {
     })
 }
 
+#[derive(Debug, Default)]
+struct InventoryScan {
+    manifests: Vec<String>,
+    top_level_dirs: Vec<String>,
+    dependencies: BTreeSet<String>,
+    generated: Vec<String>,
+    tools: BTreeSet<String>,
+}
+
 pub(super) fn inventory_source(
     source_path: &Utf8Path,
     name: &str,
+    destination: &Utf8Path,
+    budget: &mut ScanBudget,
 ) -> Result<SourceInventory, RepoctlError> {
-    let mut manifests = Vec::new();
-    let mut top_level_dirs = Vec::new();
-    let mut dependencies = BTreeSet::new();
-    let mut generated = Vec::new();
-    let mut tools = BTreeSet::new();
-    let has_vcs = source_path.join(".git").exists();
-    let readme_summary = read_readme_summary(source_path)?;
-
-    for entry in fs::read_dir(source_path)
-        .map_err(|source| RepoctlError::io(source_path.to_path_buf(), source))?
-    {
-        let entry = entry.map_err(|source| RepoctlError::io(source_path.to_path_buf(), source))?;
-        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
-            RepoctlError::diagnostic(Diagnostic::error(
-                "path.non_utf8",
-                format!("path is not valid UTF-8: {}", path.display()),
-            ))
-        })?;
-        let Some(file_name) = path.file_name() else {
-            continue;
-        };
-        if path.is_dir() {
-            top_level_dirs.push(file_name.to_string());
-        }
-    }
-
-    collect_inventory_files(
-        source_path,
-        source_path,
-        &mut manifests,
-        &mut dependencies,
-        &mut generated,
-        &mut tools,
-    )?;
-    top_level_dirs.sort();
-    manifests.sort();
-    generated.sort();
+    let mut scan = InventoryScan::default();
+    walk_source(source_path, destination, budget, &mut |entry| {
+        inventory_entry(entry, &mut scan)
+    })?;
+    scan.top_level_dirs.sort();
+    scan.manifests.sort();
+    scan.generated.sort();
     Ok(SourceInventory {
         name: name.to_string(),
-        has_vcs,
-        readme_summary,
-        manifests,
-        top_level_dirs,
-        dependency_references: dependencies.into_iter().collect(),
-        generated_artifacts: generated,
-        required_tools: tools.into_iter().collect(),
+        has_vcs: source_path.join(".git").exists(),
+        readme_summary: read_readme_summary(source_path)?,
+        manifests: scan.manifests,
+        top_level_dirs: scan.top_level_dirs,
+        dependency_references: scan.dependencies.into_iter().collect(),
+        generated_artifacts: scan.generated,
+        required_tools: scan.tools.into_iter().collect(),
     })
 }
 
-fn collect_inventory_files(
-    root: &Utf8Path,
-    current: &Utf8Path,
-    manifests: &mut Vec<String>,
-    dependencies: &mut BTreeSet<String>,
-    generated: &mut Vec<String>,
-    tools: &mut BTreeSet<String>,
-) -> Result<(), RepoctlError> {
-    for entry in
-        fs::read_dir(current).map_err(|source| RepoctlError::io(current.to_path_buf(), source))?
-    {
-        let entry = entry.map_err(|source| RepoctlError::io(current.to_path_buf(), source))?;
-        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
-            RepoctlError::diagnostic(Diagnostic::error(
-                "path.non_utf8",
-                format!("path is not valid UTF-8: {}", path.display()),
-            ))
-        })?;
-        if path.is_symlink() {
-            return Err(RepoctlError::diagnostic(Diagnostic::error(
-                "adoption.copy.symlink",
-                format!("adoption source contains a symlink: {path}"),
-            )));
+fn inventory_entry(entry: SourceEntry, scan: &mut InventoryScan) -> Result<(), RepoctlError> {
+    let relative = entry.relative.as_str();
+    let Some(name) = entry.path.file_name() else {
+        return Ok(());
+    };
+    if entry.kind == SourceEntryKind::Directory && !relative.contains('/') {
+        scan.top_level_dirs.push(name.to_string());
+    }
+    if entry.kind == SourceEntryKind::Excluded {
+        scan.generated.push(relative.to_string());
+        return Ok(());
+    }
+    if entry.kind != SourceEntryKind::File {
+        return Ok(());
+    }
+    if is_primary_manifest(name) {
+        scan.manifests.push(relative.to_string());
+    }
+    match name {
+        "Cargo.toml" => {
+            collect_cargo_dependencies(&entry.path, &mut scan.dependencies, &mut scan.tools)?;
         }
-        let Some(name) = path.file_name() else {
-            continue;
-        };
-        let rel = path
-            .strip_prefix(root)
-            .map_or_else(|_| name.to_string(), |value| value.as_str().to_string());
-        if path.is_dir() {
-            if ADOPTION_EXCLUDED_DIRS.contains(&name) {
-                generated.push(rel);
-                continue;
-            }
-            collect_inventory_files(root, &path, manifests, dependencies, generated, tools)?;
-            continue;
+        "package.json" => {
+            collect_package_json_dependencies(
+                &entry.path,
+                &mut scan.dependencies,
+                &mut scan.tools,
+            )?;
         }
-        if is_primary_manifest(name)
-            || rel.ends_with("/package.json")
-            || rel.ends_with("/Cargo.toml")
-        {
-            manifests.push(rel.clone());
-        }
-        if name == "Cargo.toml" {
-            collect_cargo_dependencies(&path, dependencies, tools)?;
-        } else if name == "package.json" {
-            collect_package_json_dependencies(&path, dependencies, tools)?;
-        } else if name == "build.rs" {
-            let content = fs::read_to_string(&path)
-                .map_err(|source| RepoctlError::io(path.clone(), source))?;
+        "build.rs" => {
+            let content = read_text(&entry.path)?;
             if content.contains("prost_build") || content.contains("protoc") {
-                tools.insert("protoc".to_string());
+                scan.tools.insert("protoc".to_string());
             }
         }
+        _ => {}
     }
     Ok(())
 }
@@ -172,7 +151,7 @@ fn read_readme_summary(source_path: &Utf8Path) -> Result<Option<String>, Repoctl
     if !path.is_file() {
         return Ok(None);
     }
-    let content = fs::read_to_string(&path).map_err(|source| RepoctlError::io(path, source))?;
+    let content = read_text(&path)?;
     let summary = content
         .lines()
         .map(str::trim)
@@ -213,8 +192,7 @@ fn collect_cargo_dependencies(
     dependencies: &mut BTreeSet<String>,
     tools: &mut BTreeSet<String>,
 ) -> Result<(), RepoctlError> {
-    let content =
-        fs::read_to_string(path).map_err(|source| RepoctlError::io(path.to_path_buf(), source))?;
+    let content = read_text(path)?;
     let Ok(document) = content.parse::<DocumentMut>() else {
         return Ok(());
     };
@@ -263,8 +241,7 @@ fn collect_package_json_dependencies(
     dependencies: &mut BTreeSet<String>,
     tools: &mut BTreeSet<String>,
 ) -> Result<(), RepoctlError> {
-    let content =
-        fs::read_to_string(path).map_err(|source| RepoctlError::io(path.to_path_buf(), source))?;
+    let content = read_text(path)?;
     let Ok(value) = serde_json::from_str::<Value>(&content) else {
         return Ok(());
     };

@@ -9,13 +9,12 @@ use std::{
     io::{self, Write as _},
 };
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use repoctl_core::{
-    AdoptionFileOperation, AdoptionPlan, Diagnostic, ProjectRelativePath, RepoRelativePath,
-    RepoctlError, Severity,
+    AdoptionFileOperation, AdoptionPlan, Diagnostic, RepoRelativePath, RepoctlError, Severity,
 };
 
-use super::ADOPTION_EXCLUDED_DIRS;
+use super::source_walk::{MAX_FILES, ScanBudget, SourceEntryKind, limit, walk_source};
 use crate::write_utf8_file;
 
 pub(crate) fn apply_adoption_plan(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
@@ -47,7 +46,9 @@ pub(crate) fn apply_adoption_plan(plan: &AdoptionPlan) -> Result<(), RepoctlErro
         apply_adoption_operation(plan, operation)?;
     }
     for operation in &plan.ci_operations {
-        if let Some(content) = &operation.content {
+        if operation.operation == "write-file"
+            && let Some(content) = &operation.content
+        {
             write_utf8_file(plan.dest_root.as_std_path(), &operation.path, content)?;
         }
     }
@@ -55,6 +56,9 @@ pub(crate) fn apply_adoption_plan(plan: &AdoptionPlan) -> Result<(), RepoctlErro
 }
 
 pub(super) fn validate_operation_paths(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
+    if plan.operations.len() > MAX_FILES {
+        return Err(limit("operations", &plan.dest_root));
+    }
     let mut destinations = BTreeSet::new();
     let mut manifest_roots = BTreeSet::new();
     for operation in &plan.operations {
@@ -91,6 +95,15 @@ pub(super) fn validate_operation_paths(plan: &AdoptionPlan) -> Result<(), Repoct
                 "adoption.ci.path",
                 "adoption CI updates must target .github/workflows/repoctl.yml",
             )));
+        }
+        if !matches!(operation.operation.as_str(), "write-file" | "report-file") {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.ci.operation",
+                "CI operations must be write-file or report-file",
+            )));
+        }
+        if operation.operation == "report-file" {
+            continue;
         }
         validate_destination(plan, &operation.path)?;
         if !destinations.insert(operation.path.clone()) {
@@ -196,92 +209,30 @@ pub(super) fn copy_operations_for_source(
     source_path: &Utf8Path,
     destination: &RepoRelativePath,
     dest_root: &Utf8Path,
+    budget: &mut ScanBudget,
 ) -> Result<Vec<AdoptionFileOperation>, RepoctlError> {
     let mut operations = Vec::new();
-    collect_copy_operations(
-        source_path,
-        source_path,
-        destination,
-        dest_root,
-        &mut operations,
-    )?;
-    Ok(operations)
-}
-
-fn copy_destination(
-    root: &Utf8Path,
-    path: &Utf8Path,
-    destination: &RepoRelativePath,
-) -> Result<RepoRelativePath, RepoctlError> {
-    let relative = path.strip_prefix(root).map_err(|_| {
-        RepoctlError::diagnostic(Diagnostic::error(
-            "adoption.copy.path",
-            "source path escaped source root",
-        ))
+    walk_source(source_path, dest_root, budget, &mut |entry| {
+        if entry.kind != SourceEntryKind::File
+            || matches!(entry.path.file_name(), Some("project.yaml" | "project.yml"))
+        {
+            return Ok(());
+        }
+        let destination_path = destination
+            .join_project(&entry.relative)
+            .map_err(RepoctlError::diagnostic)?;
+        if dest_root.join(destination_path.as_str()).exists() {
+            return Err(conflict(&destination_path));
+        }
+        operations.push(AdoptionFileOperation {
+            id: format!("adoption.copy.{destination_path}"),
+            operation: "copy-file".to_string(),
+            source_path: Some(entry.path),
+            destination_path,
+            content: None,
+            checksum: None,
+        });
+        Ok(())
     })?;
-    let relative_project_path = ProjectRelativePath::new(relative.as_str().to_string())
-        .map_err(RepoctlError::diagnostic)?;
-    let destination_path = destination
-        .join_project(&relative_project_path)
-        .map_err(RepoctlError::diagnostic)?;
-    Ok(destination_path)
-}
-
-fn collect_copy_operations(
-    root: &Utf8Path,
-    current: &Utf8Path,
-    destination: &RepoRelativePath,
-    dest_root: &Utf8Path,
-    operations: &mut Vec<AdoptionFileOperation>,
-) -> Result<(), RepoctlError> {
-    for entry in
-        fs::read_dir(current).map_err(|source| RepoctlError::io(current.to_path_buf(), source))?
-    {
-        let entry = entry.map_err(|source| RepoctlError::io(current.to_path_buf(), source))?;
-        let path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|path| {
-            RepoctlError::diagnostic(Diagnostic::error(
-                "path.non_utf8",
-                format!("path is not valid UTF-8: {}", path.display()),
-            ))
-        })?;
-        let Some(name) = path.file_name() else {
-            continue;
-        };
-        if matches!(name, "project.yaml" | "project.yml") {
-            continue;
-        }
-        if path.is_dir() && ADOPTION_EXCLUDED_DIRS.contains(&name) {
-            continue;
-        }
-        let destination_path = copy_destination(root, &path, destination)?;
-        if path.is_symlink() {
-            return Err(RepoctlError::diagnostic(Diagnostic::error(
-                "adoption.copy.symlink",
-                format!("adoption source contains a symlink: {path}"),
-            )));
-        }
-        if path.is_dir() {
-            collect_copy_operations(root, &path, destination, dest_root, operations)?;
-        } else {
-            let target = dest_root.join(destination_path.as_str());
-            if target.exists() {
-                return Err(RepoctlError::diagnostic(
-                    Diagnostic::error(
-                        "adoption.copy.conflict",
-                        format!("destination `{destination_path}` already exists"),
-                    )
-                    .with_path(destination_path.as_str()),
-                ));
-            }
-            operations.push(AdoptionFileOperation {
-                id: format!("adoption.copy.{destination_path}"),
-                operation: "copy-file".to_string(),
-                source_path: Some(path),
-                destination_path,
-                content: None,
-                checksum: None,
-            });
-        }
-    }
-    Ok(())
+    Ok(operations)
 }

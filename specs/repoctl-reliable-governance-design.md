@@ -194,6 +194,28 @@ All adoption output paths are checked at both planning and apply time before any
 mutation. Existing project.yaml/project.yml, existing copied or rewritten files,
 and duplicate destinations are errors. Adoption writes and copies create new files
 exclusively. A deliberately regenerated CI workflow may replace its existing file.
+`--ci report-only` serializes a preview-only `report-file` operation; saving and
+applying the plan preserves both an existing workflow and its absence. Only
+`--ci update` emits an applicable workflow write; `off` emits no CI operation.
+
+Canonicalize source and destination roots. Reject identical roots and prune a
+nested destination from candidate discovery, inventory, package indexing and copy
+planning, so an initialized destination cannot be imported into itself. Explicit
+source repositories inside a destination are still supported.
+
+Inventory and copy planning share the same iterative traversal policy, with each
+stage's budgets shared across all selected sources: at most 20,000 files,
+100,000 directory entries and 64 levels, with at most 256 source candidates and
+20,000 final operations. Inspected text files are bounded to 256 KiB each and
+64 MiB in aggregate. Exceeding a budget produces an `adoption.limit.*` error
+before filesystem mutation; excluded sources are not deeply inventoried.
+
+Recognize legacy binary `bun.lockb` as a Bun lock owner and copy it byte-for-byte
+when dependencies are unchanged. Automatic dependency rewrites omit the stale
+binary lock, explicitly request `bun install --lockfile-only --ignore-scripts
+--save-text-lockfile`, and retarget generated manifest lockfile paths and required
+refresh output to `bun.lock`. Binary locks never enter text dependency parsing.
+
 
 ## Buf and AI interfaces
 

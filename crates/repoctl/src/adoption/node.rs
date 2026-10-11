@@ -36,6 +36,7 @@ pub(super) fn node_install(inventory: &SourceInventory, root: &str) -> NodeInsta
             "pnpm-lock.yaml",
             "yarn.lock",
             "bun.lock",
+            "bun.lockb",
             "package-lock.json",
         ],
     );
@@ -45,7 +46,7 @@ pub(super) fn node_install(inventory: &SourceInventory, root: &str) -> NodeInsta
     {
         Some("pnpm-lock.yaml") => ("pnpm", "target/pnpm"),
         Some("yarn.lock") => ("yarn", "target/yarn"),
-        Some("bun.lock") => ("bun", "target/bun"),
+        Some("bun.lock" | "bun.lockb") => ("bun", "target/bun"),
         _ => ("npm", "target/npm"),
     };
     let owner = lockfile

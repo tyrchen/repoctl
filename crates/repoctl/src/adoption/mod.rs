@@ -19,6 +19,7 @@ mod node;
 mod packages;
 mod placement;
 mod rewrites;
+mod source_walk;
 mod synthesis;
 
 pub(super) use files::apply_adoption_plan;
@@ -27,6 +28,7 @@ use inventory::{inventory_source, source_name, source_repositories};
 use packages::build_adopted_package_index;
 use placement::{PlacementDecision, infer_placement};
 use rewrites::{apply_rewrites_to_operations, plan_dependency_rewrites};
+use source_walk::{MAX_FILES, SourceBudgets, limit};
 use synthesis::{project_name_for_destination, synthesize_project_manifest};
 
 const ADOPTION_EXCLUDED_DIRS: &[&str] = &[
@@ -58,6 +60,17 @@ pub(super) fn utf8_absolute(path: &Path) -> Result<Utf8PathBuf, RepoctlError> {
     })
 }
 
+fn canonical_root(path: &Path) -> Result<Utf8PathBuf, RepoctlError> {
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| RepoctlError::io(path.display().to_string(), error))?;
+    Utf8PathBuf::from_path_buf(canonical).map_err(|path| {
+        RepoctlError::diagnostic(Diagnostic::error(
+            "path.non_utf8",
+            format!("path is not valid UTF-8: {}", path.display()),
+        ))
+    })
+}
+
 pub(super) fn read_adoption_plan(path: &Path) -> Result<AdoptionPlan, RepoctlError> {
     let bytes =
         fs::read(path).map_err(|source| RepoctlError::io(path.display().to_string(), source))?;
@@ -76,12 +89,19 @@ pub(super) fn plan_adoption(
     request: &AdoptionPlanRequest,
     repoctl: &Repoctl,
 ) -> Result<AdoptionPlan, RepoctlError> {
-    let source_root = utf8_absolute(&request.source)?;
+    let source_root = canonical_root(&request.source)?;
     let dest_root = utf8_absolute(&request.dest)?;
     if !dest_root.join("repo.yaml").is_file() {
         return Err(RepoctlError::diagnostic(Diagnostic::error(
             "adoption.dest.uninitialized",
             "destination must be an initialized repoctl monorepo with repo.yaml",
+        )));
+    }
+    let dest_root = canonical_root(dest_root.as_std_path())?;
+    if source_root == dest_root {
+        return Err(RepoctlError::diagnostic(Diagnostic::error(
+            "adoption.source.destination_overlap",
+            "source and destination must be different directories",
         )));
     }
 
@@ -102,6 +122,7 @@ pub(super) fn plan_adoption(
             &source_plan.sources,
             &dependency_rewrites,
             &mut source_plan.operations,
+            &mut source_plan.manifest_syntheses,
             &mut source_plan.diagnostics,
         )?
     } else {
@@ -124,7 +145,12 @@ pub(super) fn plan_adoption(
         vec![repoctl_core::FileOperation {
             path: RepoRelativePath::new(".github/workflows/repoctl.yml")
                 .map_err(RepoctlError::diagnostic)?,
-            operation: "write-file".to_string(),
+            operation: if request.ci == AdoptionCiMode::ReportOnly {
+                "report-file"
+            } else {
+                "write-file"
+            }
+            .to_string(),
             content: Some(content),
         }]
     };
@@ -156,6 +182,7 @@ struct AdoptionSourcePlan {
     operations: Vec<AdoptionFileOperation>,
     manifest_syntheses: Vec<ProjectManifestSynthesis>,
     diagnostics: Vec<Diagnostic>,
+    budgets: SourceBudgets,
 }
 
 fn plan_adoption_sources(
@@ -163,7 +190,7 @@ fn plan_adoption_sources(
     source_root: &Utf8Path,
     dest_root: &Utf8Path,
 ) -> Result<AdoptionSourcePlan, RepoctlError> {
-    let candidates = source_repositories(source_root)?;
+    let candidates = source_repositories(source_root, dest_root)?;
     let mut plan = AdoptionSourcePlan::default();
     for source_path in candidates {
         append_adoption_source(request, dest_root, source_path, &mut plan)?;
@@ -180,7 +207,14 @@ fn append_adoption_source(
     let name = source_name(&source_path)?;
     let include_selected = request.include.is_empty() || request.include.contains(&name);
     let skipped = !include_selected || request.exclude.contains(&name);
-    let inventory = inventory_source(&source_path, &name)?;
+    let inventory = if skipped {
+        SourceInventory {
+            name: name.clone(),
+            ..SourceInventory::default()
+        }
+    } else {
+        inventory_source(&source_path, &name, dest_root, &mut plan.budgets.inventory)?
+    };
     let placement = infer_placement(
         &name,
         &inventory,
@@ -218,29 +252,27 @@ fn append_adoption_source(
         .or_else(|| OwnerHandle::new(format!("@{name}")).ok());
     let manifest =
         synthesize_project_manifest(&source_path, &placement, &inventory, owner.as_ref())?;
-    plan.operations.extend(copy_operations_for_source(
+    let copies = copy_operations_for_source(
         &source_path,
         &placement.destination,
         dest_root,
-    )?);
+        &mut plan.budgets.copy,
+    )?;
+    if plan
+        .operations
+        .len()
+        .saturating_add(copies.len())
+        .saturating_add(1)
+        > MAX_FILES
+    {
+        return Err(limit("operations", dest_root));
+    }
+    plan.operations.extend(copies);
     let manifest_path = placement
         .destination
         .join_project(&ProjectRelativePath::new("project.yaml").map_err(RepoctlError::diagnostic)?)
         .map_err(RepoctlError::diagnostic)?;
-    for name in ["project.yaml", "project.yml"] {
-        let path = placement.destination.as_str().to_string() + "/" + name;
-        if dest_root.join(&path).exists()
-            || plan
-                .operations
-                .iter()
-                .any(|op| op.destination_path.as_str() == path)
-        {
-            return Err(RepoctlError::diagnostic(Diagnostic::error(
-                "adoption.copy.conflict",
-                format!("destination `{path}` already exists or is planned twice"),
-            )));
-        }
-    }
+    validate_manifest_destination(dest_root, &placement.destination, &plan.operations)?;
     plan.operations.push(AdoptionFileOperation {
         id: format!("adoption.manifest.{name}"),
         operation: "write-file".to_string(),
@@ -262,6 +294,27 @@ fn append_adoption_source(
         inventory,
         false,
     ));
+    Ok(())
+}
+
+fn validate_manifest_destination(
+    dest_root: &Utf8Path,
+    destination: &RepoRelativePath,
+    operations: &[AdoptionFileOperation],
+) -> Result<(), RepoctlError> {
+    for name in ["project.yaml", "project.yml"] {
+        let path = destination.as_str().to_string() + "/" + name;
+        if dest_root.join(&path).exists()
+            || operations
+                .iter()
+                .any(|op| op.destination_path.as_str() == path)
+        {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.copy.conflict",
+                format!("destination `{path}` already exists or is planned twice"),
+            )));
+        }
+    }
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 //! Project manifests, workspace commands and infrastructure synthesis.
 
-use std::{collections::BTreeMap, fmt::Write as _, fs};
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use camino::Utf8Path;
 use repoctl_core::{
@@ -14,6 +14,7 @@ use super::{
     node::{nearest_lockfile, node_install},
     placement::PlacementDecision,
     process_command,
+    source_walk::read_text,
 };
 
 pub(super) fn synthesize_project_manifest(
@@ -210,8 +211,7 @@ fn node_tasks(
     spec: &TaskWorkspace,
 ) -> Result<Vec<(&'static str, String)>, RepoctlError> {
     let manifest = source.join(&spec.manifest);
-    let content =
-        fs::read_to_string(&manifest).map_err(|error| RepoctlError::io(manifest.clone(), error))?;
+    let content = read_text(&manifest)?;
     let package: Value = serde_json::from_str(&content)
         .map_err(|error| RepoctlError::Environment(error.to_string()))?;
     let program = if spec.toolchain.is_empty() {
