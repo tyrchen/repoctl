@@ -11,7 +11,7 @@
 - [中文 README](README.zh-CN.md)
 - [中文使用指南](guides/user-guide.zh-CN.md)
 - [中文开发指南](guides/developer-guide.zh-CN.md)
-- [多语言仓库治理 v0.7](guides/reliable-governance.zh-CN.md)
+- [多语言仓库治理与安全迁移 v0.7](guides/reliable-governance.zh-CN.md)
 
 ## Research
 

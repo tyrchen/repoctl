@@ -30,4 +30,4 @@
 ## Reliable Multilingual Governance
 
 - [Product scope, design and acceptance contract](repoctl-reliable-governance-design.md)
-- [Acceptance evidence and verification boundaries](repoctl-reliable-governance-verification-plan.md)
+- [Acceptance, PR review regressions and verification boundaries](repoctl-reliable-governance-verification-plan.md)

@@ -4,13 +4,13 @@ use std::{collections::BTreeMap, fmt::Write as _, fs};
 
 use camino::Utf8Path;
 use repoctl_core::{
-    Diagnostic, OwnerHandle, ProjectKind, ProjectName, RepoRelativePath, RepoctlError,
-    SourceInventory,
+    AdoptedSource, Diagnostic, OwnerHandle, ProcessCommand, ProjectKind, ProjectName,
+    ProjectRelativePath, RepoRelativePath, RepoctlError, SourceInventory,
 };
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::placement::PlacementDecision;
+use super::{node::node_install, placement::PlacementDecision, process_command};
 
 pub(super) fn synthesize_project_manifest(
     source_path: &Utf8Path,
@@ -112,7 +112,12 @@ fn synthesize_workspaces(inventory: &SourceInventory) -> Vec<String> {
         let root = manifest.strip_suffix("/package.json").unwrap_or(".");
         let root = if root.is_empty() { "." } else { root };
         let name = node_workspace_name(root);
-        let (toolchain, lockfile, cache_dir) = node_toolchain(inventory, root);
+        let install = node_install(inventory, root);
+        let toolchain = install.toolchain;
+        let cache_dir = install.cache_dir;
+        let lockfile = install
+            .lockfile
+            .map_or_else(String::new, |path| format!("    lockfile: {path}\n"));
         workspaces.push(format!(
             "  - name: {name}\n    language: typescript\n    toolchain: {toolchain}\n    root: \
              {root}\n    manifest: {manifest}\n{lockfile}    cache_dir: \
@@ -150,42 +155,6 @@ fn node_workspace_name(root: &str) -> String {
         "." | "frontend" => "frontend".to_string(),
         value if value.contains("client") => "client-ts".to_string(),
         value => value.replace('/', "-"),
-    }
-}
-
-fn node_toolchain(inventory: &SourceInventory, root: &str) -> (&'static str, String, &'static str) {
-    let prefix = if root == "." { "" } else { root };
-    let lock_path = |name: &str| {
-        if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        }
-    };
-    if inventory.manifests.contains(&lock_path("pnpm-lock.yaml")) {
-        (
-            "pnpm",
-            format!("    lockfile: {}\n", lock_path("pnpm-lock.yaml")),
-            "target/pnpm",
-        )
-    } else if inventory.manifests.contains(&lock_path("yarn.lock")) {
-        (
-            "yarn",
-            format!("    lockfile: {}\n", lock_path("yarn.lock")),
-            "target/yarn",
-        )
-    } else if inventory.manifests.contains(&lock_path("bun.lock")) {
-        (
-            "bun",
-            format!("    lockfile: {}\n", lock_path("bun.lock")),
-            "target/bun",
-        )
-    } else {
-        (
-            "npm",
-            format!("    lockfile: {}\n", lock_path("package-lock.json")),
-            "target/npm",
-        )
     }
 }
 
@@ -268,6 +237,44 @@ fn node_tasks(
         tasks.push(("check", command));
     }
     Ok(tasks)
+}
+
+pub(super) fn append_node_build_verification(
+    destination: &Utf8Path,
+    source: &AdoptedSource,
+    commands: &mut Vec<ProcessCommand>,
+) -> Result<(), RepoctlError> {
+    for manifest in source
+        .inventory
+        .manifests
+        .iter()
+        .filter(|path| path.ends_with("package.json"))
+    {
+        let root = manifest.strip_suffix("/package.json").unwrap_or(".");
+        let install = node_install(&source.inventory, root);
+        let workspace = TaskWorkspace {
+            name: node_workspace_name(root),
+            language: "typescript".to_string(),
+            manifest: manifest.clone(),
+            toolchain: install.toolchain.to_string(),
+        };
+        if node_tasks(&source.source_path, &workspace)?
+            .iter()
+            .any(|(task, _)| *task == "build")
+        {
+            let cwd = source
+                .destination_path
+                .join_project(&ProjectRelativePath::new(root).map_err(RepoctlError::diagnostic)?)
+                .map_err(RepoctlError::diagnostic)?;
+            commands.push(process_command(
+                destination,
+                &cwd,
+                install.toolchain,
+                ["run", "build"],
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn synthesize_iac(inventory: &SourceInventory) -> Result<Option<String>, RepoctlError> {

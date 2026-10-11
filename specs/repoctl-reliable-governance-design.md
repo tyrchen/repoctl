@@ -118,6 +118,10 @@ matching workspace inspections and discard them before the next construction.
 Cargo preserves the existing metadata inspector for explicit full verification and adds an offline TOML path
 inspector. Unknown external dependencies are not internal edges. Ambiguous local
 names and malformed manifests are diagnostics, not ignored success.
+Declared Cargo workspace roots expand explicit and globbed `members`, honor `exclude`,
+and inspect member dependency/target tables plus implicit in-workspace path packages.
+Traversal is offline and bounded to 4096 packages, 100000 entries and 64 levels;
+missing member manifests, malformed patterns and repository escapes fail explicitly.
 
 An affected reason records source, target, reason and optional edge kind/evidence.
 Reverse traversal uses a queue and all project dependency surfaces. Reviewers come
@@ -163,6 +167,23 @@ manifest dependency, so a repository's dependency union cannot rewrite unrelated
 tables. Python migration remains copying/manifests; Python source rewriting is not
 claimed by adoption. Build generated CI from the post-adoption manifests, not the
 pre-adoption empty destination graph.
+
+Node package task workspaces retain their package roots while inheriting the nearest
+lockfile-owning directory's package manager and project-relative lockfile path.
+Packages without a lockfile do not declare an invented one. CI installs from the
+owning directory and runs scripts from the package directory.
+
+Automatic Node dependency rewrites invalidate the owner's copied lockfile. Plans
+expose deduplicated `lockfileRefreshes` with a destination lockfile and a typed
+package-manager command, and emit an actionable warning. `adopt apply` copies only
+reviewed files; users run the refresh commands afterward and commit regenerated
+locks before frozen CI. `adopt verify` fails while any required lock is missing.
+Yarn classic and modern refresh commands differ; lifecycle scripts are skipped.
+
+All adoption output paths are checked at both planning and apply time before any
+mutation. Existing project.yaml/project.yml, existing copied or rewritten files,
+and duplicate destinations are errors. Adoption writes and copies create new files
+exclusively. A deliberately regenerated CI workflow may replace its existing file.
 
 ## Buf and AI interfaces
 

@@ -325,6 +325,21 @@ impl Repoctl {
         })?;
         let mut diagnostics = report.diagnostics;
         diagnostics.extend(hygiene.diagnostics);
+        for refresh in &plan.lockfile_refreshes {
+            if !plan.dest_root.join(refresh.lockfile.as_str()).is_file() {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "adoption.lockfile.refresh_required",
+                        format!(
+                            "regenerate `{}` with the planned lockfile refresh command before \
+                             verification",
+                            refresh.lockfile
+                        ),
+                    )
+                    .with_path(refresh.lockfile.as_str()),
+                );
+            }
+        }
         Ok(ValidationReport::new(diagnostics))
     }
 

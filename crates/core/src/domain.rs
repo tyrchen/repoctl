@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     diagnostic::{Diagnostic, Severity},
     execution::TaskExecutionOptions,
+    migration::LockfileRefresh,
 };
 
 const NAME_MAX_BYTES: usize = 128;
@@ -2207,6 +2208,9 @@ pub struct AdoptionPlan {
     pub operations: Vec<AdoptionFileOperation>,
     /// Dependency rewrite operations.
     pub dependency_rewrites: Vec<DependencyRewrite>,
+    /// Required lockfile regeneration after applying dependency rewrites.
+    #[serde(default)]
+    pub lockfile_refreshes: Vec<LockfileRefresh>,
     /// Synthesized manifests.
     pub manifest_syntheses: Vec<ProjectManifestSynthesis>,
     /// CI file operations.

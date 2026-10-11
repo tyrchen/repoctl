@@ -1,5 +1,7 @@
 //! Failure, cache-contract and offline-discovery regressions.
 
+mod adoption_execution;
+mod adoption_review;
 mod buf_contract;
 mod contracts;
 mod review;

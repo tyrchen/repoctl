@@ -1,6 +1,13 @@
 //! Reviewed adoption file operations and copying.
 
-use std::fs;
+// Adoption applies synchronously through the CLI facade, outside an async runtime.
+#![allow(clippy::disallowed_types)]
+
+use std::{
+    collections::BTreeSet,
+    fs::{self, File, OpenOptions},
+    io::{self, Write as _},
+};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use repoctl_core::{
@@ -47,9 +54,24 @@ pub(crate) fn apply_adoption_plan(plan: &AdoptionPlan) -> Result<(), RepoctlErro
     Ok(())
 }
 
-fn validate_operation_paths(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
+pub(super) fn validate_operation_paths(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
+    let mut destinations = BTreeSet::new();
+    let mut manifest_roots = BTreeSet::new();
     for operation in &plan.operations {
         validate_destination(plan, &operation.destination_path)?;
+        let absolute = plan.dest_root.join(operation.destination_path.as_str());
+        if !destinations.insert(operation.destination_path.clone()) || absolute.exists() {
+            return Err(conflict(&operation.destination_path));
+        }
+        if matches!(absolute.file_name(), Some("project.yaml" | "project.yml"))
+            && absolute.parent().is_some_and(|parent| {
+                !manifest_roots.insert(parent.to_path_buf())
+                    || parent.join("project.yaml").exists()
+                    || parent.join("project.yml").exists()
+            })
+        {
+            return Err(conflict(&operation.destination_path));
+        }
         if let Some(source) = &operation.source_path {
             let root = fs::canonicalize(&plan.source_root)
                 .map_err(|error| RepoctlError::io(plan.source_root.clone(), error))?;
@@ -64,9 +86,28 @@ fn validate_operation_paths(plan: &AdoptionPlan) -> Result<(), RepoctlError> {
         }
     }
     for operation in &plan.ci_operations {
+        if operation.path.as_str() != ".github/workflows/repoctl.yml" {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.ci.path",
+                "adoption CI updates must target .github/workflows/repoctl.yml",
+            )));
+        }
         validate_destination(plan, &operation.path)?;
+        if !destinations.insert(operation.path.clone()) {
+            return Err(conflict(&operation.path));
+        }
     }
     Ok(())
+}
+
+fn conflict(path: &RepoRelativePath) -> RepoctlError {
+    RepoctlError::diagnostic(
+        Diagnostic::error(
+            "adoption.copy.conflict",
+            format!("destination `{path}` already exists or is planned twice"),
+        )
+        .with_path(path.as_str()),
+    )
 }
 
 fn validate_destination(
@@ -75,6 +116,14 @@ fn validate_destination(
 ) -> Result<(), RepoctlError> {
     RepoRelativePath::new(destination.as_str()).map_err(RepoctlError::diagnostic)?;
     let absolute = plan.dest_root.join(destination.as_str());
+    if absolute.parent().is_some_and(|parent| {
+        parent
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(&plan.dest_root))
+            .any(|ancestor| ancestor.exists() && !ancestor.is_dir())
+    }) {
+        return Err(conflict(destination));
+    }
     if absolute
         .as_std_path()
         .ancestors()
@@ -109,39 +158,38 @@ fn apply_adoption_operation(
     }
     let destination = plan.dest_root.join(operation.destination_path.as_str());
     if let Some(content) = &operation.content {
-        write_utf8_file(
-            plan.dest_root.as_std_path(),
-            &operation.destination_path,
-            content,
-        )?;
+        create_destination(&destination)?
+            .write_all(content.as_bytes())
+            .map_err(|error| RepoctlError::io(destination.clone(), error))?;
         return Ok(());
     }
     let Some(source) = &operation.source_path else {
         return Ok(());
     };
     if destination.exists() {
-        return Err(RepoctlError::diagnostic(
-            Diagnostic::error(
-                "adoption.copy.conflict",
-                format!(
-                    "destination `{}` already exists",
-                    operation.destination_path
-                ),
-            )
-            .with_path(operation.destination_path.as_str()),
-        ));
+        return Err(conflict(&operation.destination_path));
     }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|source| RepoctlError::io(parent.as_str().to_string(), source))?;
-    }
-    fs::copy(source, &destination)
-        .map_err(|source_error| RepoctlError::io(destination.as_str().to_string(), source_error))?;
+    let mut source_file =
+        File::open(source).map_err(|error| RepoctlError::io(source.clone(), error))?;
+    io::copy(&mut source_file, &mut create_destination(&destination)?)
+        .map_err(|error| RepoctlError::io(destination.clone(), error))?;
     let metadata = fs::metadata(source)
         .map_err(|source_error| RepoctlError::io(source.as_str().to_string(), source_error))?;
     fs::set_permissions(&destination, metadata.permissions())
         .map_err(|source_error| RepoctlError::io(destination.as_str().to_string(), source_error))?;
     Ok(())
+}
+
+fn create_destination(path: &Utf8Path) -> Result<File, RepoctlError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| RepoctlError::io(parent.to_path_buf(), error))?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| RepoctlError::io(path.to_path_buf(), error))
 }
 
 pub(super) fn copy_operations_for_source(

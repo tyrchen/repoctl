@@ -3,6 +3,7 @@
 
 //! Offline package dependency discovery without registry access or package-manager execution.
 
+mod cargo;
 mod packages;
 
 use std::{
@@ -42,21 +43,7 @@ impl WorkspaceInspector for LocalRustWorkspaceInspector {
             return Ok(Vec::new());
         };
         let doc = parse_toml(&text, &path)?;
-        let mut edges = Vec::new();
-        cargo_tables(&doc, &mut |table| {
-            for (name, item) in table.iter() {
-                if let Some(path_text) = item.get("path").and_then(Item::as_str) {
-                    append_path_edge(input, &path, path_text, name, &mut edges)?;
-                } else if item.get("workspace").and_then(Item::as_bool) == Some(true)
-                    && let Some((workspace_path, dependency)) =
-                        inherited_cargo_dependency(&path, name, input)?
-                {
-                    append_path_edge(input, &workspace_path, &dependency, name, &mut edges)?;
-                }
-            }
-            Ok(())
-        })?;
-        Ok(edges)
+        cargo::inspect(input, &path, &doc)
     }
 }
 
@@ -365,6 +352,27 @@ fn inherited_cargo_dependency(
     name: &str,
     input: &WorkspaceInspectionInput<'_>,
 ) -> Result<Option<(PathBuf, String)>, RepoctlError> {
+    if let Some(text) = read_manifest(path, input.root.absolute.as_std_path())? {
+        let doc = parse_toml(&text, path)?;
+        if let Some(workspace) =
+            toml_path(doc.as_item(), &["package", "workspace"]).and_then(Item::as_str)
+        {
+            let parent = path
+                .parent()
+                .ok_or_else(|| manifest_error(path, "manifest has no parent"))?;
+            let manifest = parent.join(workspace).join("Cargo.toml");
+            let text =
+                read_manifest(&manifest, input.root.absolute.as_std_path())?.ok_or_else(|| {
+                    manifest_error(path, "explicit Cargo workspace manifest is missing")
+                })?;
+            let doc = parse_toml(&text, &manifest)?;
+            return Ok(
+                toml_path(doc.as_item(), &["workspace", "dependencies", name, "path"])
+                    .and_then(Item::as_str)
+                    .map(|local| (manifest, local.to_string())),
+            );
+        }
+    }
     for ancestor in path
         .parent()
         .into_iter()
@@ -374,11 +382,12 @@ fn inherited_cargo_dependency(
         let manifest = ancestor.join("Cargo.toml");
         if let Some(text) = read_manifest(&manifest, input.root.absolute.as_std_path())? {
             let doc = parse_toml(&text, &manifest)?;
-            if let Some(local) =
-                toml_path(doc.as_item(), &["workspace", "dependencies", name, "path"])
-                    .and_then(Item::as_str)
-            {
-                return Ok(Some((manifest, local.to_string())));
+            if doc.get("workspace").is_some() {
+                return Ok(
+                    toml_path(doc.as_item(), &["workspace", "dependencies", name, "path"])
+                        .and_then(Item::as_str)
+                        .map(|local| (manifest, local.to_string())),
+                );
             }
         }
     }

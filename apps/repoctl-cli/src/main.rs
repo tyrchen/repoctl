@@ -2517,6 +2517,15 @@ fn render_adoption_plan(plan: &AdoptionPlan, format: OutputFormat) -> Result<(),
                     .collect(),
             );
             append_operation_table(&mut output, "CI operations", &plan.ci_operations);
+            append_command_table(
+                &mut output,
+                "Required lockfile refreshes after apply",
+                &plan
+                    .lockfile_refreshes
+                    .iter()
+                    .map(|refresh| refresh.command.clone())
+                    .collect::<Vec<_>>(),
+            );
             append_command_table(&mut output, "Verification", &plan.verification.commands);
             if !plan.verification.prerequisites.is_empty() {
                 append_table(

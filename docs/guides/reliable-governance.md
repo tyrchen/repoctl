@@ -146,6 +146,17 @@ rewriting dependency sources. Unresolvable workspace inheritance is an error.
 Placement uses README/content indicators or explicit `--map` overrides. Task
 synthesis uses actual workspace names, existing Node scripts/TypeScript config and
 Python compile checks. Python dependency-source rewriting is not included.
+Cargo virtual workspaces expand explicit/globbed members and excludes offline,
+including inherited, target-specific and implicit member path dependencies.
+Node child packages keep their scripts while inheriting the nearest lockfile owner
+and package manager; CI installs in the owner directory. Unlocked packages do not
+declare invented lockfiles.
+
+Automatic Node rewrites omit stale locks and expose required `lockfileRefreshes`.
+After `adopt apply`, run these commands in their declared directories, commit the
+regenerated locks, then run `adopt verify`; missing required locks fail verification.
+Apply executes file operations only. Planning and apply preflight reject existing
+project.yaml/project.yml, other file conflicts and duplicate output paths.
 
 Rust request/command structs gained execution/cache/context/proto options; the
 workspace version is bumped to 0.7.0 for these API changes. Prefer default request

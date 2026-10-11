@@ -14,6 +14,8 @@ use super::Repoctl;
 
 mod files;
 mod inventory;
+mod lockfiles;
+mod node;
 mod packages;
 mod placement;
 mod rewrites;
@@ -94,6 +96,17 @@ pub(super) fn plan_adoption(
     if request.rewrite_deps == DependencyRewriteMode::Auto {
         apply_rewrites_to_operations(&mut source_plan.operations, &dependency_rewrites)?;
     }
+    let lockfile_refreshes = if request.rewrite_deps == DependencyRewriteMode::Auto {
+        lockfiles::plan_refreshes(
+            &dest_root,
+            &source_plan.sources,
+            &dependency_rewrites,
+            &mut source_plan.operations,
+            &mut source_plan.diagnostics,
+        )?
+    } else {
+        Vec::new()
+    };
     let ci_operations = if request.ci == AdoptionCiMode::Off {
         Vec::new()
     } else {
@@ -119,19 +132,22 @@ pub(super) fn plan_adoption(
         &dest_root,
         request.verification.clone(),
         &source_plan.sources,
-    );
+    )?;
 
-    Ok(AdoptionPlan {
+    let plan = AdoptionPlan {
         source_root,
         dest_root,
         sources: source_plan.sources,
         operations: source_plan.operations,
         dependency_rewrites,
+        lockfile_refreshes,
         manifest_syntheses: source_plan.manifest_syntheses,
         ci_operations,
         verification,
         diagnostics: source_plan.diagnostics,
-    })
+    };
+    files::validate_operation_paths(&plan)?;
+    Ok(plan)
 }
 
 #[derive(Debug, Default)]
@@ -211,6 +227,20 @@ fn append_adoption_source(
         .destination
         .join_project(&ProjectRelativePath::new("project.yaml").map_err(RepoctlError::diagnostic)?)
         .map_err(RepoctlError::diagnostic)?;
+    for name in ["project.yaml", "project.yml"] {
+        let path = placement.destination.as_str().to_string() + "/" + name;
+        if dest_root.join(&path).exists()
+            || plan
+                .operations
+                .iter()
+                .any(|op| op.destination_path.as_str() == path)
+        {
+            return Err(RepoctlError::diagnostic(Diagnostic::error(
+                "adoption.copy.conflict",
+                format!("destination `{path}` already exists or is planned twice"),
+            )));
+        }
+    }
     plan.operations.push(AdoptionFileOperation {
         id: format!("adoption.manifest.{name}"),
         operation: "write-file".to_string(),
@@ -259,7 +289,7 @@ fn adoption_verification_plan(
     dest_root: &Utf8Path,
     mode: ValidationMode,
     sources: &[AdoptedSource],
-) -> VerificationPlan {
+) -> Result<VerificationPlan, RepoctlError> {
     let mut prerequisites = BTreeMap::new();
     for source in sources.iter().filter(|source| !source.skipped) {
         for tool in &source.inventory.required_tools {
@@ -305,25 +335,13 @@ fn adoption_verification_plan(
                     ["check", "--workspace", "--all-features"],
                 ));
             }
-            if source
-                .inventory
-                .manifests
-                .iter()
-                .any(|path| path.ends_with("package.json"))
-            {
-                commands.push(process_command(
-                    dest_root,
-                    &source.destination_path,
-                    "npm",
-                    ["run", "build"],
-                ));
-            }
+            synthesis::append_node_build_verification(dest_root, source, &mut commands)?;
         }
     }
-    VerificationPlan {
+    Ok(VerificationPlan {
         prerequisites: prerequisites.into_values().collect(),
         commands,
-    }
+    })
 }
 
 fn process_command<const N: usize>(

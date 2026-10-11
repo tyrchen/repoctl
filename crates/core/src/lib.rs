@@ -16,6 +16,7 @@ pub mod diagnostic;
 pub mod domain;
 pub mod execution;
 pub mod manifest;
+pub mod migration;
 pub mod ports;
 
 pub use diagnostic::{
@@ -56,6 +57,7 @@ pub use domain::{
 };
 pub use execution::{TaskCacheConfig, TaskExecutionOptions};
 pub use manifest::{ManifestSource, YamlManifestParser};
+pub use migration::LockfileRefresh;
 pub use ports::{
     DiscoveredEdge, FixedRepoLocator, GraphBuildInput, GraphBuilder, InMemoryRepoFileSystem,
     ManifestParser, PolicyContext, PolicyRule, ProcessRunner, RenderRequest, RenderedTemplate,

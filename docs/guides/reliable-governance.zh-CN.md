@@ -4,6 +4,8 @@ repoctl 的核心定位是为开发者、CI 和 AI 提供共同的架构、归�
 默认离线读取 Cargo、Node、Python 清单；仅显式的 `graph validate --mode full`
 可能运行 Cargo metadata。Doctor 的各项检查共享一次发现得到的快照，下一次调用重新发现。
 Node/Python 包索引和解析后的清单在每次建图内共享，下一次建图会重新读取。
+Cargo 虚拟 workspace 会展开成员及通配符，遵循排除规则，并读取成员的依赖、target 表和
+workspace 继承；不需要运行 Cargo。缺失成员或路径越出仓库会报错。
 
 ## 任务与变更影响
 
@@ -92,6 +94,13 @@ repoctl affected --changed-file frameworks/ui/src/index.ts --diagram mermaid
 迁移覆盖通用 Cargo/Node 包，保留 Cargo 别名、features、optional、default-features 和 target
 配置；重名包及无法解析的 workspace 继承会失败。归类依据内容或 `--map`，任务依据实际
 workspace、Node scripts/TypeScript 配置及 Python 编译检查生成。Python 依赖源重写不在本版本内。
+Node 子包保留独立任务，并继承最近的锁文件及包管理器，CI 在锁文件所属目录安装依赖。
+没有锁文件时不会生成虚假的锁文件声明。
+
+自动改写 Node 依赖后，旧锁文件不会被复制；计划中的 `lockfileRefreshes` 列出必须执行的
+刷新命令。先执行 `adopt apply`，再在指定目录运行这些命令、提交新锁文件，最后执行
+`adopt verify`。缺失待刷新的锁文件会使验证失败。迁移本身不会运行包管理器。
+规划和应用前都会检查已有文件及重复目标；已有 `project.yaml` 或 `project.yml` 不会被覆盖。
 
 Rust API 新增请求和执行字段，因此版本升级为 0.7.0；YAML 新选项均可省略。
 详细契约见[设计规格](../../specs/repoctl-reliable-governance-design.md)和[英文指南](reliable-governance.md)。

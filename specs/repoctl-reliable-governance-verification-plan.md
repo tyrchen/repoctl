@@ -43,7 +43,7 @@ REPOCTL_TEST_BUF=<Buf 1.73.0 executable> make test-buf
 git diff --check
 ```
 
-The workspace suite contains 107 regular tests and six doctests. The separately
+The workspace suite contains 113 regular tests and seven doctests. The separately
 enabled real Buf test adds one passing integration test. Audit has no vulnerability
 findings; deny passes advisories, bans, licenses and sources. Non-failing deny
 warnings concern duplicate dependency versions and unused license allowances.
@@ -125,3 +125,38 @@ its complete Rust/Buf gate.
   surfaces. There is no new unsafe code. The PR's own CI runs the Linux Rust/Buf
   checks; the generated standalone workflow is tested structurally and through its
   selected CLI execution, and awaits the 0.7.0 release for hosted adoption.
+
+## Cargo and adoption review follow-up
+
+The next four P1 findings are valid and fixed. Six additional end-to-end tests in
+[adoption review](../apps/repoctl-cli/tests/regressions/adoption_review.rs) and
+[adoption execution](../apps/repoctl-cli/tests/regressions/adoption_execution.rs) cover:
+
+- Virtual Cargo roots, explicit/globbed and sibling members, both explicit and glob
+  exclusions, inherited workspace dependencies (including `package.workspace`),
+  target/build/dev tables and implicit path packages. A framework change propagates
+  to the virtual-workspace consumer. Missing members and escaped glob prefixes fail.
+- Nearest pnpm/yarn/npm lockfile ownership, a nested Bun override, absent locks,
+  actual child scripts and full-verification package-manager selection. A fake pnpm
+  executable verifies frozen installation in the owning root and script execution
+  in the child package directory.
+- Stale npm/pnpm/Yarn classic/Yarn modern/Bun text locks omitted from file operations,
+  typed refresh commands, one root refresh for multiple rewritten child packages,
+  successful apply without copying old locks, and verification failure before refresh.
+  A separate real npm check uses `--offline --no-audit --no-fund` with local packages:
+  the planned command creates a v3 lock, after which `adopt verify` succeeds. Yarn
+  refresh modes follow [modern](https://yarnpkg.com/cli/install) and
+  [classic](https://classic.yarnpkg.com/en/docs/cli/install) documentation; Bun uses
+  its documented [lockfile-only mode](https://bun.com/docs/pm/lockfile).
+- Existing project manifests at planning time, files appearing between plan/apply,
+  duplicate generated operations, and CI operations targeting project metadata.
+  Rejections preserve existing content and happen before any copied file appears.
+
+Build, 113 workspace tests, seven doctests, 113 nextest cases, nightly formatting,
+strict pedantic clippy and API documentation pass. The managed handoff fixture's
+12 focused Rust files have zero size findings. Doctor has no graph/ownership or
+other health errors and retains seven inherited warnings in the touched CLI,
+core domain and facade roots. The all-source scan remains at 13 existing warnings;
+no policy thresholds were changed. Dependencies, lockfiles, agent instructions and
+Buf execution are unchanged in this follow-up, so audit/deny, agent sync and the
+separate local real-Buf gate were not repeated; hosted CI still exercises real Buf.
