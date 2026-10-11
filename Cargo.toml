@@ -15,23 +15,23 @@ readme = "README.md"
 [workspace.dependencies]
 anyhow = "1.0.104"
 blake3 = "1.8.7"
-camino = { version = "1.2.2", features = ["serde1"] }
+camino = { version = "1.2.6", features = ["serde1"] }
 cargo_metadata = "0.23.1"
-clap = { version = "4.6.1", features = ["derive"] }
-cliclack = "0.5.4"
-globset = "0.4.18"
-ignore = "0.4.26"
-memchr = "2.8.1"
-minijinja = "2.20.0"
+clap = { version = "4.6.7", features = ["derive"] }
+cliclack = "0.5.6"
+globset = "0.4.20"
+ignore = "0.4.33"
+memchr = "2.8.3"
+minijinja = "2.24.0"
 rayon = "1.12.0"
-schemars = { version = "1.2.1", features = ["derive"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+schemars = { version = "1.2.2", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 serde_norway = "0.9.42"
-thiserror = "2.0.18"
+thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros", "process", "io-util", "time", "fs"] }
-toml_edit = "0.25.12"
-tree-sitter = "0.26.9"
+toml_edit = "0.25.17"
+tree-sitter = "0.26.13"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
