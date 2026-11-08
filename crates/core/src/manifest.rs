@@ -16,8 +16,8 @@ use crate::{
         ProjectManifest, ProjectName, ProjectOpsSpec, ProjectProtoSpec, ProjectRelativePath,
         RepoGlob, RepoInspectionConfig, RepoLayout, RepoManifest, RepoName, RepoPolicySet,
         RepoRelativePath, RuntimeDependencySpec, SchemaId, TaskCommand, TaskDependency, TaskName,
-        TemplateFile, TemplateInput, TemplateManifest, Toolchain, Visibility, WorkspaceLanguage,
-        WorkspaceName, WorkspaceSpec,
+        TemplateFile, TemplateInput, TemplateManifest, ToolDirectory, Toolchain, Visibility,
+        WorkspaceLanguage, WorkspaceName, WorkspaceSpec,
     },
     execution::{TaskCacheConfig, TaskExecutionOptions},
     ports::ManifestParser,
@@ -921,12 +921,12 @@ impl RawWorkspaceSpec {
             target_dir: self
                 .target_dir
                 .as_deref()
-                .map(repo_path_from_template)
+                .map(ToolDirectory::parse)
                 .transpose()?,
             cache_dir: self
                 .cache_dir
                 .as_deref()
-                .map(repo_path_from_template)
+                .map(ToolDirectory::parse)
                 .transpose()?,
         })
     }
@@ -1535,13 +1535,6 @@ fn parse_iac_provider(value: &str) -> Result<IacProvider, Diagnostic> {
             format!("unsupported IaC provider `{value}`"),
         )),
     }
-}
-
-fn repo_path_from_template(value: &str) -> Result<RepoRelativePath, Diagnostic> {
-    let stripped = value
-        .strip_prefix("{repo_root}/")
-        .map_or(value, |path| path);
-    RepoRelativePath::new(stripped.to_string())
 }
 
 fn parse_area_map(

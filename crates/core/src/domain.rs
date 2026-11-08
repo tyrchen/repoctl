@@ -282,6 +282,85 @@ impl Default for RepoRelativePath {
     }
 }
 
+/// Directory a toolchain writes to, such as a Cargo target directory or a package cache.
+///
+/// Manifests write it as `{repo_root}/<path>` or a bare `<path>` (inside the repository) or as
+/// `~/<path>` (inside the home directory, so worktrees and clones share it). Tasks run in their
+/// workspace directory, so the directory is always handed to tools as an absolute path.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ToolDirectory {
+    /// A directory inside the repository.
+    Repo(RepoRelativePath),
+    /// A directory inside the user's home directory; the path is relative to it.
+    Home(String),
+}
+
+impl ToolDirectory {
+    /// Parses the manifest form.
+    pub fn parse(value: &str) -> Result<Self, Diagnostic> {
+        if let Some(path) = value.strip_prefix("~/") {
+            return normalize_relative_path(path.to_string(), false).map(Self::Home);
+        }
+        if value.starts_with('~') {
+            return Err(Diagnostic::error(
+                "manifest.path.home",
+                "only the current user's home directory (`~/`) is supported",
+            ));
+        }
+        let path = value.strip_prefix("{repo_root}/").unwrap_or(value);
+        RepoRelativePath::new(path.to_string()).map(Self::Repo)
+    }
+
+    /// The absolute directory for `root`, with `home` as the user's home directory.
+    pub fn resolve(
+        &self,
+        root: &RepoRoot,
+        home: Option<&Utf8Path>,
+    ) -> Result<Utf8PathBuf, Diagnostic> {
+        match self {
+            Self::Repo(path) => Ok(root.join(path)),
+            Self::Home(path) => home.map(|home| home.join(path)).ok_or_else(|| {
+                Diagnostic::error(
+                    "runner.home_unknown",
+                    format!("cannot resolve `~/{path}`: the home directory is unknown"),
+                )
+            }),
+        }
+    }
+}
+
+impl Display for ToolDirectory {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Repo(path) => write!(f, "{{repo_root}}/{path}"),
+            Self::Home(path) => write!(f, "~/{path}"),
+        }
+    }
+}
+
+impl Serialize for ToolDirectory {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolDirectory {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(|diagnostic| serde::de::Error::custom(diagnostic.message))
+    }
+}
+
+impl JsonSchema for ToolDirectory {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ToolDirectory".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        String::json_schema(generator)
+    }
+}
+
 /// Project-relative path that cannot escape its project root.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -975,10 +1054,10 @@ pub struct WorkspaceSpec {
     pub manifest: ProjectRelativePath,
     /// Optional lockfile path relative to the project root.
     pub lockfile: Option<ProjectRelativePath>,
-    /// Optional repo-level target directory.
-    pub target_dir: Option<RepoRelativePath>,
-    /// Optional repo-level cache directory.
-    pub cache_dir: Option<RepoRelativePath>,
+    /// Optional toolchain target directory.
+    pub target_dir: Option<ToolDirectory>,
+    /// Optional toolchain cache directory.
+    pub cache_dir: Option<ToolDirectory>,
 }
 
 /// Task command declared for a workspace.
@@ -3153,7 +3232,52 @@ fn default_context_budget() -> usize {
 mod tests {
     use super::{
         CommandSpec, OwnerHandle, ProjectDependency, ProjectRelativePath, RepoRelativePath,
+        RepoRoot, ToolDirectory,
     };
+
+    #[test]
+    fn test_should_parse_and_resolve_tool_directories() {
+        let root = RepoRoot {
+            absolute: camino::Utf8PathBuf::from("/repo"),
+        };
+        let home = camino::Utf8PathBuf::from("/home/dev");
+        for (text, canonical, resolved) in [
+            (
+                "{repo_root}/target/rust",
+                "{repo_root}/target/rust",
+                "/repo/target/rust",
+            ),
+            ("target/bun", "{repo_root}/target/bun", "/repo/target/bun"),
+            ("~/.target", "~/.target", "/home/dev/.target"),
+            ("~/./cache//uv", "~/cache/uv", "/home/dev/cache/uv"),
+        ] {
+            let directory = ToolDirectory::parse(text).expect("parses");
+            assert_eq!(directory.to_string(), canonical);
+            assert_eq!(
+                directory.resolve(&root, Some(&home)).expect("resolves"),
+                resolved
+            );
+            let json = serde_json::to_string(&directory).expect("serializes");
+            assert_eq!(
+                serde_json::from_str::<ToolDirectory>(&json).expect("round trips"),
+                directory
+            );
+        }
+        for invalid in [
+            "~other/cache",
+            "~/../escape",
+            "/abs/target",
+            "~/",
+            "target/../x",
+        ] {
+            assert!(ToolDirectory::parse(invalid).is_err(), "{invalid}");
+        }
+        let error = ToolDirectory::parse("~/.target")
+            .expect("parses")
+            .resolve(&root, None)
+            .expect_err("needs home");
+        assert_eq!(error.code.as_ref(), "runner.home_unknown");
+    }
 
     #[test]
     fn test_should_parse_argv_command() {

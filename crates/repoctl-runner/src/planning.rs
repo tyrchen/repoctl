@@ -5,10 +5,11 @@ use std::{
     sync::Arc,
 };
 
+use camino::Utf8PathBuf;
 use repoctl_core::{
-    AffectedReport, Diagnostic, ProcessCommand, ProjectManifest, ProjectName, RepoSnapshot,
-    RepoctlError, TaskCommand, TaskDependency, TaskName, TaskRunRequest, ToolchainAdapter,
-    ToolchainEnvironmentInput, WorkspaceName, WorkspaceSpec,
+    AffectedReport, Diagnostic, ProcessCommand, ProjectManifest, ProjectName, RepoRoot,
+    RepoSnapshot, RepoctlError, TaskCommand, TaskDependency, TaskName, TaskRunRequest,
+    ToolchainAdapter, ToolchainEnvironmentInput, WorkspaceName, WorkspaceSpec,
 };
 
 pub(super) fn plan_task_commands(
@@ -255,21 +256,28 @@ fn build_process_command(
         absolute_cwd,
         program: task_command.command.program.clone(),
         args: task_command.command.args.clone(),
-        env: toolchain_env(workspace, toolchain_adapters)?,
+        env: toolchain_env(workspace, &snapshot.root, toolchain_adapters)?,
     })
 }
 
 fn toolchain_env(
     workspace: &WorkspaceSpec,
+    repo_root: &RepoRoot,
     toolchain_adapters: &[Arc<dyn ToolchainAdapter>],
 ) -> Result<BTreeMap<String, String>, RepoctlError> {
     let mut env = BTreeMap::new();
     let Some(toolchain) = &workspace.toolchain else {
         return Ok(env);
     };
+    let home = std::env::home_dir().and_then(|home| Utf8PathBuf::from_path_buf(home).ok());
+    let input = ToolchainEnvironmentInput {
+        workspace,
+        repo_root,
+        home: home.as_deref(),
+    };
     for adapter in toolchain_adapters {
         if adapter.toolchain() == *toolchain {
-            env.extend(adapter.environment(&ToolchainEnvironmentInput { workspace })?);
+            env.extend(adapter.environment(&input)?);
         }
     }
     Ok(env)

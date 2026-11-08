@@ -236,8 +236,15 @@ pub struct WorkspaceSpec {
     pub root: ProjectRelativePath,
     pub manifest: ProjectRelativePath,
     pub lockfile: Option<ProjectRelativePath>,
-    pub target_dir: Option<RepoRelativePath>,
-    pub cache_dir: Option<RepoRelativePath>,
+    pub target_dir: Option<ToolDirectory>,
+    pub cache_dir: Option<ToolDirectory>,
+}
+
+/// `{repo_root}/<path>` or a bare `<path>` inside the repository, or `~/<path>` inside the
+/// user's home directory (shared across worktrees and clones).
+pub enum ToolDirectory {
+    Repo(RepoRelativePath),
+    Home(String),
 }
 
 pub struct RepoGraph {
@@ -674,7 +681,10 @@ The task runner is generic. It does not understand every language. It:
 - Reads task definitions from `project.yaml`.
 - Orders work by dependency graph.
 - Sets `cwd` to the workspace root.
-- Injects toolchain environment such as `CARGO_TARGET_DIR` or `UV_CACHE_DIR`.
+- Injects toolchain environment such as `CARGO_TARGET_DIR` or `UV_CACHE_DIR`. Directories are
+  always absolute: repo directories resolve against the repository root and `~/` directories
+  against the home directory, because the child runs in the workspace directory and would
+  otherwise read a relative path (or a literal `~`) against it.
 - Spawns child processes with argv form.
 - Streams or captures output based on caller options.
 - Returns a structured summary.
