@@ -288,7 +288,11 @@ fn test_should_generate_standalone_executable_ci_with_a_real_matrix() -> TestRes
         .as_str()
         .ok_or("workflow content missing")?;
     let workflow: Value = serde_norway::from_str(text)?;
-    assert!(text.contains("cargo install repoctl-cli --version '=0.7.0' --locked"));
+    let install = format!(
+        "cargo install repoctl-cli --version '={}' --locked",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(text.matches(&install).count(), 2);
     assert!(!text.contains("--dry-run"));
     assert!(!text.contains("--path apps/repoctl-cli"));
     assert_eq!(
