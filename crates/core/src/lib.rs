@@ -52,8 +52,8 @@ pub use domain::{
     SourceInventory, TaskCommand, TaskCommandOutput, TaskDependency, TaskName, TaskRunPlan,
     TaskRunReport, TaskRunRequest, TemplateFile, TemplateInput, TemplateListReport,
     TemplateListRequest, TemplateManifest, TemplateRenderRequest, TemplateSource, TemplateSummary,
-    ToolPrerequisite, Toolchain, ValidationMode, VerificationPlan, Visibility, WorkspaceLanguage,
-    WorkspaceName, WorkspaceSpec, utf8_path_buf, validate_project_convention,
+    ToolDirectory, ToolPrerequisite, Toolchain, ValidationMode, VerificationPlan, Visibility,
+    WorkspaceLanguage, WorkspaceName, WorkspaceSpec, utf8_path_buf, validate_project_convention,
 };
 pub use execution::{TaskCacheConfig, TaskExecutionOptions};
 pub use manifest::{ManifestSource, YamlManifestParser};

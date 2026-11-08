@@ -2,13 +2,15 @@
 
 use std::collections::BTreeMap;
 
+use camino::Utf8Path;
+
 use crate::{
     RepoManifest, TemplateFile,
     diagnostic::{Diagnostic, RepoctlError},
     domain::{
         EdgeKind, GraphEdge, ProcessCommand, ProcessOutput, ProjectManifest, RepoGraph,
         RepoRelativePath, RepoRoot, RepoSnapshot, ResolvedTemplateSource, TemplateManifest,
-        TemplateSource, Toolchain, WorkspaceLanguage, WorkspaceSpec,
+        TemplateSource, ToolDirectory, Toolchain, WorkspaceLanguage, WorkspaceSpec,
     },
     manifest::ManifestSource,
 };
@@ -263,6 +265,28 @@ pub trait ProcessRunner: Send + Sync {
 pub struct ToolchainEnvironmentInput<'a> {
     /// Workspace requiring task environment setup.
     pub workspace: &'a WorkspaceSpec,
+    /// Repository root, which repo-relative tool directories resolve against.
+    pub repo_root: &'a RepoRoot,
+    /// The user's home directory, which `~/` tool directories resolve against.
+    pub home: Option<&'a Utf8Path>,
+}
+
+impl ToolchainEnvironmentInput<'_> {
+    /// `name = <absolute directory>` when the workspace configures `directory`, else nothing.
+    pub fn directory_env(
+        &self,
+        name: &str,
+        directory: Option<&ToolDirectory>,
+    ) -> Result<BTreeMap<String, String>, RepoctlError> {
+        let mut env = BTreeMap::new();
+        if let Some(directory) = directory {
+            let resolved = directory
+                .resolve(self.repo_root, self.home)
+                .map_err(RepoctlError::diagnostic)?;
+            env.insert(name.to_string(), resolved.into_string());
+        }
+        Ok(env)
+    }
 }
 
 /// Supplies task environment variables for one workspace toolchain.

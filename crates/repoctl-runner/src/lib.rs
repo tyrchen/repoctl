@@ -71,11 +71,7 @@ impl ToolchainAdapter for RustToolchainAdapter {
         &self,
         input: &ToolchainEnvironmentInput<'_>,
     ) -> Result<BTreeMap<String, String>, RepoctlError> {
-        let mut env = BTreeMap::new();
-        if let Some(target_dir) = &input.workspace.target_dir {
-            env.insert("CARGO_TARGET_DIR".to_string(), target_dir.to_string());
-        }
-        Ok(env)
+        input.directory_env("CARGO_TARGET_DIR", input.workspace.target_dir.as_ref())
     }
 }
 
@@ -92,11 +88,7 @@ impl ToolchainAdapter for NpmToolchainAdapter {
         &self,
         input: &ToolchainEnvironmentInput<'_>,
     ) -> Result<BTreeMap<String, String>, RepoctlError> {
-        let mut env = BTreeMap::new();
-        if let Some(cache_dir) = &input.workspace.cache_dir {
-            env.insert("NPM_CONFIG_CACHE".to_string(), cache_dir.to_string());
-        }
-        Ok(env)
+        input.directory_env("NPM_CONFIG_CACHE", input.workspace.cache_dir.as_ref())
     }
 }
 
@@ -113,11 +105,7 @@ impl ToolchainAdapter for PnpmToolchainAdapter {
         &self,
         input: &ToolchainEnvironmentInput<'_>,
     ) -> Result<BTreeMap<String, String>, RepoctlError> {
-        let mut env = BTreeMap::new();
-        if let Some(cache_dir) = &input.workspace.cache_dir {
-            env.insert("PNPM_STORE_DIR".to_string(), cache_dir.to_string());
-        }
-        Ok(env)
+        input.directory_env("PNPM_STORE_DIR", input.workspace.cache_dir.as_ref())
     }
 }
 
@@ -134,11 +122,7 @@ impl ToolchainAdapter for YarnToolchainAdapter {
         &self,
         input: &ToolchainEnvironmentInput<'_>,
     ) -> Result<BTreeMap<String, String>, RepoctlError> {
-        let mut env = BTreeMap::new();
-        if let Some(cache_dir) = &input.workspace.cache_dir {
-            env.insert("YARN_CACHE_FOLDER".to_string(), cache_dir.to_string());
-        }
-        Ok(env)
+        input.directory_env("YARN_CACHE_FOLDER", input.workspace.cache_dir.as_ref())
     }
 }
 
@@ -155,11 +139,7 @@ impl ToolchainAdapter for BunToolchainAdapter {
         &self,
         input: &ToolchainEnvironmentInput<'_>,
     ) -> Result<BTreeMap<String, String>, RepoctlError> {
-        let mut env = BTreeMap::new();
-        if let Some(cache_dir) = &input.workspace.cache_dir {
-            env.insert("BUN_INSTALL_CACHE_DIR".to_string(), cache_dir.to_string());
-        }
-        Ok(env)
+        input.directory_env("BUN_INSTALL_CACHE_DIR", input.workspace.cache_dir.as_ref())
     }
 }
 
@@ -176,11 +156,7 @@ impl ToolchainAdapter for UvToolchainAdapter {
         &self,
         input: &ToolchainEnvironmentInput<'_>,
     ) -> Result<BTreeMap<String, String>, RepoctlError> {
-        let mut env = BTreeMap::new();
-        if let Some(cache_dir) = &input.workspace.cache_dir {
-            env.insert("UV_CACHE_DIR".to_string(), cache_dir.to_string());
-        }
-        Ok(env)
+        input.directory_env("UV_CACHE_DIR", input.workspace.cache_dir.as_ref())
     }
 }
 
@@ -2305,8 +2281,8 @@ fn unique_strings(values: Vec<String>) -> Vec<String> {
 mod tests {
     use repoctl_core::{
         CommandSpec, ProjectKind, ProjectRelativePath, RepoGraph, RepoManifest, RepoName,
-        RepoPolicySet, RepoRoot, SchemaId, TaskCommand, WorkspaceLanguage, WorkspaceName,
-        WorkspaceSpec,
+        RepoPolicySet, RepoRoot, SchemaId, TaskCommand, ToolDirectory, WorkspaceLanguage,
+        WorkspaceName, WorkspaceSpec,
     };
 
     use super::*;
@@ -2326,6 +2302,57 @@ mod tests {
                 .iter()
                 .any(|task| task == "apps.catalog:api:check")
         );
+    }
+
+    #[test]
+    fn test_should_hand_tools_absolute_directories() {
+        let snapshot = fixture_snapshot();
+        let request = TaskRunRequest {
+            tasks: vec![TaskName::new("check").expect("task")],
+            projects: vec![ProjectName::new("apps.catalog").expect("project")],
+            ..TaskRunRequest::default()
+        };
+        let (commands, _) =
+            plan_task_commands(&snapshot, &request, None, &default_toolchain_adapters())
+                .expect("plan");
+        assert_eq!(
+            commands[0].env.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/tmp/repoctl-test/target/rust")
+        );
+    }
+
+    #[test]
+    fn test_should_resolve_home_directories_for_every_toolchain() {
+        let root = RepoRoot {
+            absolute: camino::Utf8PathBuf::from("/tmp/repoctl-test"),
+        };
+        let home = camino::Utf8PathBuf::from("/home/dev");
+        let mut workspace = fixture_snapshot().projects[0].workspaces[0].clone();
+        workspace.target_dir = Some(ToolDirectory::parse("~/.target").expect("dir"));
+        workspace.cache_dir = Some(ToolDirectory::parse("{repo_root}/target/bun").expect("dir"));
+        let input = ToolchainEnvironmentInput {
+            workspace: &workspace,
+            repo_root: &root,
+            home: Some(&home),
+        };
+        let rust = RustToolchainAdapter.environment(&input).expect("env");
+        assert_eq!(
+            rust.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/home/dev/.target")
+        );
+        let bun = BunToolchainAdapter.environment(&input).expect("env");
+        assert_eq!(
+            bun.get("BUN_INSTALL_CACHE_DIR").map(String::as_str),
+            Some("/tmp/repoctl-test/target/bun")
+        );
+        let homeless = ToolchainEnvironmentInput {
+            home: None,
+            ..input
+        };
+        let error = RustToolchainAdapter
+            .environment(&homeless)
+            .expect_err("no home");
+        assert_eq!(error.diagnostics()[0].code.as_ref(), "runner.home_unknown");
     }
 
     #[test]
@@ -2472,7 +2499,7 @@ mod tests {
                 root: ProjectRelativePath::new(".").expect("path"),
                 manifest: ProjectRelativePath::new("Cargo.toml").expect("path"),
                 lockfile: None,
-                target_dir: Some(RepoRelativePath::new("target/rust").expect("path")),
+                target_dir: Some(ToolDirectory::parse("{repo_root}/target/rust").expect("path")),
                 cache_dir: None,
             }],
             depends_on: Vec::new(),
