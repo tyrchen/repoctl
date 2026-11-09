@@ -10,9 +10,14 @@ use repoctl_core::{
 
 use super::unique_strings;
 
+/// Projects that changes of repository-root Cargo files reach, keyed by the changed file. A root
+/// Cargo file missing here is a repo-wide change.
+pub(super) type CargoAttribution = BTreeMap<RepoRelativePath, BTreeSet<ProjectName>>;
+
 pub(super) fn compute_affected(
     snapshot: &RepoSnapshot,
     changed_files: &[RepoRelativePath],
+    cargo: &CargoAttribution,
     requested_tasks: &[TaskName],
 ) -> AffectedReport {
     let mut direct = BTreeSet::new();
@@ -22,6 +27,17 @@ pub(super) fn compute_affected(
     let mut reviewers = BTreeSet::new();
     let mut diagnostics = Vec::new();
     for changed_file in changed_files {
+        if let Some(projects) = cargo.get(changed_file) {
+            for project in projects {
+                direct.insert(project.clone());
+                reasons.push(reason(
+                    changed_file,
+                    project,
+                    "root Cargo workspace change reaches project crates",
+                ));
+            }
+            continue;
+        }
         if repo_wide_change(changed_file) {
             for project in &snapshot.projects {
                 direct.insert(project.name.clone());
