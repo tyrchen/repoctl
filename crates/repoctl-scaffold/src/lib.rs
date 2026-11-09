@@ -189,10 +189,11 @@ impl ScaffoldService {
     /// Plans and optionally applies a new project scaffold.
     pub fn new_project(&self, request: &NewProjectRequest) -> Result<RenderPlan, RepoctlError> {
         let root = locate_or_current(request.repo.as_deref())?;
+        let cargo = CargoLayout::detect(&root)?;
         let operations = match request.kind {
-            ProjectKind::App => Self::app_operations(request)?,
-            ProjectKind::Framework => Self::framework_operations(request)?,
-            ProjectKind::FoundationService => Self::foundation_operations(request)?,
+            ProjectKind::App => Self::app_operations(request, cargo)?,
+            ProjectKind::Framework => Self::framework_operations(request, cargo)?,
+            ProjectKind::FoundationService => Self::foundation_operations(request, cargo)?,
             ProjectKind::Tool => Self::tool_operations(request)?,
             ProjectKind::ProtoRoot | ProjectKind::CoreInfra | ProjectKind::CoreInfraComponent => {
                 return Err(RepoctlError::diagnostic(Diagnostic::error(
@@ -201,7 +202,18 @@ impl ScaffoldService {
                 )));
             }
         };
-        let diagnostics = apply_operations(&root, &operations, request.dry_run)?;
+        let mut diagnostics = apply_operations(&root, &operations, request.dry_run)?;
+        if cargo.hakari
+            && operations
+                .iter()
+                .any(|operation| operation.operation == CARGO_MEMBER_OPERATION)
+        {
+            diagnostics.push(Diagnostic::warning(
+                "scaffold.cargo.workspace_hack",
+                "the new crates joined the root Cargo workspace; run `cargo hakari generate` and \
+                 `cargo hakari manage-deps` so they depend on the workspace-hack crate",
+            ));
+        }
         Ok(RenderPlan {
             operations,
             diagnostics,
@@ -326,7 +338,10 @@ impl ScaffoldService {
         })
     }
 
-    fn app_operations(request: &NewProjectRequest) -> Result<Vec<FileOperation>, RepoctlError> {
+    fn app_operations(
+        request: &NewProjectRequest,
+        cargo: CargoLayout,
+    ) -> Result<Vec<FileOperation>, RepoctlError> {
         let slug = slug_from_path(&request.path)?;
         let project = project_name(&request.path, &ProjectKind::App)?;
         let owner = owner_or_default(request.owner.as_ref(), &slug);
@@ -338,22 +353,15 @@ impl ScaffoldService {
             request.stack.clone()
         };
         if stack.iter().any(|entry| entry == "rust-api") {
-            workspaces.push(
-                r#"  - name: api
-    language: rust
-    root: api
-    manifest: api/Cargo.toml
-    lockfile: api/Cargo.lock
-    target_dir: "{repo_root}/target/rust""#
-                    .to_string(),
-            );
-            push_task(&mut tasks, "check", "api", "cargo check --workspace");
-            push_task(&mut tasks, "test", "api", "cargo test --workspace");
+            workspaces.push(cargo.workspace_yaml("api", "api", "api/Cargo.toml"));
+            let select = cargo.select(std::slice::from_ref(&slug));
+            push_task(&mut tasks, "check", "api", &format!("cargo check {select}"));
+            push_task(&mut tasks, "test", "api", &format!("cargo test {select}"));
             push_task(
                 &mut tasks,
                 "build",
                 "api",
-                "cargo build --workspace --release",
+                &format!("cargo build {select} --release"),
             );
         }
         if stack.iter().any(|entry| entry == "bun-web") {
@@ -464,6 +472,7 @@ ai:
                 &format!("{}/api/Cargo.toml", request.path),
                 rust_workspace_toml(&slug),
             )?);
+            operations.extend(cargo.member_operation(&format!("{}/api", request.path))?);
             operations.push(file_operation(
                 &format!("{}/api/src/lib.rs", request.path),
                 rust_app_lib(&slug),
@@ -509,6 +518,7 @@ ai:
 
     fn framework_operations(
         request: &NewProjectRequest,
+        cargo: CargoLayout,
     ) -> Result<Vec<FileOperation>, RepoctlError> {
         let slug = slug_from_path(&request.path)?;
         let project = project_name(&request.path, &ProjectKind::Framework)?;
@@ -522,24 +532,28 @@ ai:
         let mut public_facades = String::new();
         let mut internal = String::new();
         let mut tasks: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        let crates = [format!("{slug}-facade"), format!("{slug}-internal")];
         if languages.iter().any(|language| language == "rust") {
-            workspaces.push(
-                r#"  - name: rust
-    language: rust
-    root: rust
-    manifest: rust/Cargo.toml
-    lockfile: rust/Cargo.lock
-    target_dir: "{repo_root}/target/rust""#
-                    .to_string(),
-            );
+            let manifest = if cargo.root {
+                format!("rust/crates/{slug}-facade/Cargo.toml")
+            } else {
+                "rust/Cargo.toml".to_string()
+            };
+            workspaces.push(cargo.workspace_yaml("rust", "rust", &manifest));
             writeln!(public_facades, "  rust:\n    - rust/crates/{slug}-facade").map_err(
                 |error| RepoctlError::Internal(format!("failed to render facade map: {error}")),
             )?;
             writeln!(internal, "  rust:\n    - rust/crates/{slug}-internal").map_err(|error| {
                 RepoctlError::Internal(format!("failed to render internal map: {error}"))
             })?;
-            push_task(&mut tasks, "check", "rust", "cargo check --workspace");
-            push_task(&mut tasks, "test", "rust", "cargo test --workspace");
+            let select = cargo.select(&crates);
+            push_task(
+                &mut tasks,
+                "check",
+                "rust",
+                &format!("cargo check {select}"),
+            );
+            push_task(&mut tasks, "test", "rust", &format!("cargo test {select}"));
         }
         if languages.iter().any(|language| language == "typescript") {
             workspaces.push(
@@ -589,13 +603,23 @@ policies:
         );
         let mut operations = project_base_operations(request, &slug, manifest)?;
         if languages.iter().any(|language| language == "rust") {
-            operations.push(file_operation(
-                &format!("{}/rust/Cargo.toml", request.path),
-                rust_workspace_manifest_toml(&[
-                    format!("crates/{slug}-facade"),
-                    format!("crates/{slug}-internal"),
-                ]),
-            )?);
+            if cargo.root {
+                for name in &crates {
+                    operations.extend(
+                        cargo.member_operation(&format!("{}/rust/crates/{name}", request.path))?,
+                    );
+                }
+            } else {
+                operations.push(file_operation(
+                    &format!("{}/rust/Cargo.toml", request.path),
+                    rust_workspace_manifest_toml(
+                        &crates
+                            .iter()
+                            .map(|name| format!("crates/{name}"))
+                            .collect::<Vec<_>>(),
+                    ),
+                )?);
+            }
             operations.push(file_operation(
                 &format!("{}/rust/crates/{slug}-facade/Cargo.toml", request.path),
                 rust_workspace_toml(&format!("{slug}-facade")),
@@ -636,6 +660,7 @@ policies:
 
     fn foundation_operations(
         request: &NewProjectRequest,
+        cargo: CargoLayout,
     ) -> Result<Vec<FileOperation>, RepoctlError> {
         let slug = slug_from_path(&request.path)?;
         let project = project_name(&request.path, &ProjectKind::FoundationService)?;
@@ -645,15 +670,7 @@ policies:
         } else {
             request.clients.clone()
         };
-        let mut workspaces = vec![
-            r#"  - name: service
-    language: rust
-    root: service
-    manifest: service/Cargo.toml
-    lockfile: service/Cargo.lock
-    target_dir: "{repo_root}/target/rust""#
-                .to_string(),
-        ];
+        let mut workspaces = vec![cargo.workspace_yaml("service", "service", "service/Cargo.toml")];
         let mut public_clients = String::new();
         if clients.iter().any(|client| client == "rust") {
             writeln!(
@@ -663,15 +680,12 @@ policies:
             .map_err(|error| {
                 RepoctlError::Internal(format!("failed to render client map: {error}"))
             })?;
-            workspaces.push(
-                r#"  - name: clients-rust
-    language: rust
-    root: clients/rust
-    manifest: clients/rust/Cargo.toml
-    lockfile: clients/rust/Cargo.lock
-    target_dir: "{repo_root}/target/rust""#
-                    .to_string(),
-            );
+            let manifest = if cargo.root {
+                format!("clients/rust/crates/{slug}-client/Cargo.toml")
+            } else {
+                "clients/rust/Cargo.toml".to_string()
+            };
+            workspaces.push(cargo.workspace_yaml("clients-rust", "clients/rust", &manifest));
         }
         if clients.iter().any(|client| client == "typescript") {
             writeln!(
@@ -712,8 +726,19 @@ policies:
             );
         }
         let mut tasks = BTreeMap::new();
-        push_task(&mut tasks, "check", "service", "cargo check --workspace");
-        push_task(&mut tasks, "test", "service", "cargo test --workspace");
+        let select = cargo.select(std::slice::from_ref(&slug));
+        push_task(
+            &mut tasks,
+            "check",
+            "service",
+            &format!("cargo check {select}"),
+        );
+        push_task(
+            &mut tasks,
+            "test",
+            "service",
+            &format!("cargo test {select}"),
+        );
         let mut manifest = format!(
             r#"{MANAGED_HEADER}
 schema: company.project/v1
@@ -773,15 +798,21 @@ iac:
             &format!("{}/service/Cargo.toml", request.path),
             rust_workspace_toml(&slug),
         )?);
+        operations.extend(cargo.member_operation(&format!("{}/service", request.path))?);
         operations.push(file_operation(
             &format!("{}/service/src/lib.rs", request.path),
             rust_foundation_service_lib(&slug),
         )?);
         if clients.iter().any(|client| client == "rust") {
-            operations.push(file_operation(
-                &format!("{}/clients/rust/Cargo.toml", request.path),
-                rust_workspace_manifest_toml(&[format!("crates/{slug}-client")]),
-            )?);
+            let client = format!("{}/clients/rust/crates/{slug}-client", request.path);
+            if cargo.root {
+                operations.extend(cargo.member_operation(&client)?);
+            } else {
+                operations.push(file_operation(
+                    &format!("{}/clients/rust/Cargo.toml", request.path),
+                    rust_workspace_manifest_toml(&[format!("crates/{slug}-client")]),
+                )?);
+            }
             operations.push(file_operation(
                 &format!(
                     "{}/clients/rust/crates/{slug}-client/Cargo.toml",
@@ -1013,6 +1044,100 @@ fn directory_operation(path: &str) -> Result<FileOperation, RepoctlError> {
     })
 }
 
+/// Operation that adds the member directory in `content` to the root workspace's `members`.
+const CARGO_MEMBER_OPERATION: &str = "cargo-member";
+
+/// How the repository organizes Rust crates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CargoLayout {
+    /// The repository root `Cargo.toml` is a workspace: new crates join it instead of declaring
+    /// their own workspace and lockfile.
+    root: bool,
+    /// The root workspace keeps a cargo-hakari workspace-hack (`.config/hakari.toml`).
+    hakari: bool,
+}
+
+impl CargoLayout {
+    fn detect(root: &Utf8PathBuf) -> Result<Self, RepoctlError> {
+        let manifest = root.join("Cargo.toml");
+        let root_workspace = if manifest.is_file() {
+            let text = fs::read_to_string(manifest.as_std_path())
+                .map_err(|source| RepoctlError::io(manifest.clone(), source))?;
+            text.parse::<toml_edit::DocumentMut>()
+                .is_ok_and(|document| document.get("workspace").is_some())
+        } else {
+            false
+        };
+        Ok(Self {
+            root: root_workspace,
+            hakari: root_workspace && root.join(".config/hakari.toml").is_file(),
+        })
+    }
+
+    /// A rust workspace entry for `project.yaml`; a crate in the root workspace has no lockfile of
+    /// its own.
+    fn workspace_yaml(self, name: &str, root: &str, manifest: &str) -> String {
+        let lockfile = if self.root {
+            String::new()
+        } else {
+            format!("\n    lockfile: {root}/Cargo.lock")
+        };
+        format!(
+            "  - name: {name}\n    language: rust\n    root: {root}\n    manifest: \
+             {manifest}{lockfile}\n    target_dir: \"{{repo_root}}/target/rust\""
+        )
+    }
+
+    /// Cargo package selection for a project's crates: the root workspace spans the repository, so
+    /// tasks name their packages.
+    fn select(self, packages: &[String]) -> String {
+        if self.root {
+            packages
+                .iter()
+                .map(|package| format!("-p {package}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            "--workspace".to_string()
+        }
+    }
+
+    fn member_operation(self, directory: &str) -> Result<Option<FileOperation>, RepoctlError> {
+        if !self.root {
+            return Ok(None);
+        }
+        Ok(Some(FileOperation {
+            path: RepoRelativePath::new("Cargo.toml").map_err(RepoctlError::diagnostic)?,
+            operation: CARGO_MEMBER_OPERATION.to_string(),
+            content: Some(directory.to_string()),
+        }))
+    }
+}
+
+/// Adds `member` to `[workspace] members` unless it is already listed.
+fn add_cargo_member(manifest: &str, member: &str) -> Result<String, RepoctlError> {
+    let invalid = |message: &str| {
+        RepoctlError::diagnostic(
+            Diagnostic::error("scaffold.cargo.root_manifest", message).with_path("Cargo.toml"),
+        )
+    };
+    let mut document = manifest
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| invalid("the root Cargo.toml does not parse"))?;
+    let members = document
+        .get_mut("workspace")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| invalid("the root Cargo.toml has no [workspace] table"))?
+        .entry("members")
+        .or_insert(toml_edit::value(toml_edit::Array::new()))
+        .as_array_mut()
+        .ok_or_else(|| invalid("[workspace] members is not an array"))?;
+    if !members.iter().any(|value| value.as_str() == Some(member)) {
+        members.push(member);
+    }
+    Ok(document.to_string())
+}
+
 fn file_operation(path: &str, content: String) -> Result<FileOperation, RepoctlError> {
     Ok(FileOperation {
         path: RepoRelativePath::new(path.to_string()).map_err(RepoctlError::diagnostic)?,
@@ -1051,6 +1176,16 @@ fn apply_operations(
         let Some(content) = &operation.content else {
             continue;
         };
+        if operation.operation == CARGO_MEMBER_OPERATION {
+            let current = fs::read_to_string(absolute.as_std_path())
+                .map_err(|source| RepoctlError::io(absolute.clone(), source))?;
+            let updated = add_cargo_member(&current, content)?;
+            if !dry_run && updated != current {
+                fs::write(absolute.as_std_path(), updated)
+                    .map_err(|source| RepoctlError::io(absolute, source))?;
+            }
+            continue;
+        }
         let content_to_write = if absolute.exists() {
             let current = fs::read_to_string(absolute.as_std_path())
                 .map_err(|source| RepoctlError::io(absolute.clone(), source))?;
@@ -3259,6 +3394,87 @@ mod tests {
                 .join("foundations/identity/iac/Pulumi.yaml")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn test_should_join_new_crates_to_a_root_cargo_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\n    \"tools/existing\",\n]\n",
+        )
+        .expect("root manifest");
+        fs::create_dir_all(temp.path().join(".config")).expect("config");
+        fs::write(
+            temp.path().join(".config/hakari.toml"),
+            "hakari-package = \"workspace-hack\"\n",
+        )
+        .expect("hakari");
+        let service = ScaffoldService::with_default_adapters();
+        let request = |kind, path: &str| NewProjectRequest {
+            repo: Some(temp.path().to_path_buf()),
+            kind,
+            path: RepoRelativePath::new(path).expect("path"),
+            stack: Vec::new(),
+            languages: vec!["rust".to_string()],
+            clients: vec!["rust".to_string()],
+            facade: false,
+            iac: None,
+            proto: None,
+            owner: None,
+            dry_run: false,
+        };
+        let app = service
+            .new_project(&request(ProjectKind::App, "apps/catalog"))
+            .expect("new app");
+        assert!(
+            app.diagnostics
+                .iter()
+                .any(|diagnostic| &*diagnostic.code == "scaffold.cargo.workspace_hack")
+        );
+        service
+            .new_project(&request(ProjectKind::Framework, "frameworks/runtime"))
+            .expect("new framework");
+        service
+            .new_project(&request(
+                ProjectKind::FoundationService,
+                "foundations/identity",
+            ))
+            .expect("new foundation");
+        let root = fs::read_to_string(temp.path().join("Cargo.toml")).expect("root");
+        for member in [
+            "tools/existing",
+            "apps/catalog/api",
+            "frameworks/runtime/rust/crates/runtime-facade",
+            "frameworks/runtime/rust/crates/runtime-internal",
+            "foundations/identity/service",
+            "foundations/identity/clients/rust/crates/identity-client",
+        ] {
+            assert!(root.contains(&format!("\"{member}\"")), "missing {member}");
+        }
+        assert!(
+            !temp
+                .path()
+                .join("frameworks/runtime/rust/Cargo.toml")
+                .exists()
+        );
+        assert!(
+            !temp
+                .path()
+                .join("foundations/identity/clients/rust/Cargo.toml")
+                .exists()
+        );
+        let app = fs::read_to_string(temp.path().join("apps/catalog/project.yaml")).expect("app");
+        assert!(app.contains("cargo test -p catalog"));
+        assert!(!app.contains("--workspace") && !app.contains("lockfile: api/Cargo.lock"));
+        let framework =
+            fs::read_to_string(temp.path().join("frameworks/runtime/project.yaml")).expect("fw");
+        assert!(framework.contains("cargo check -p runtime-facade -p runtime-internal"));
+        assert!(framework.contains("manifest: rust/crates/runtime-facade/Cargo.toml"));
+        let foundation =
+            fs::read_to_string(temp.path().join("foundations/identity/project.yaml")).expect("fd");
+        assert!(foundation.contains("manifest: clients/rust/crates/identity-client/Cargo.toml"));
+        assert!(!foundation.contains("Cargo.lock"));
     }
 
     #[test]
