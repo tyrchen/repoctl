@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use repoctl_core::{ProcessCommand, RepoRelativePath, RepoctlError, TaskExecutionOptions};
 
-use super::{GitProvider, process::run_bytes};
+use super::{GitProvider, cargo_workspace::FileVersions, process::run_bytes};
 
 /// Local Git provider including both sides of renamed paths.
 #[derive(Clone, Debug, Default)]
@@ -36,6 +36,60 @@ impl GitProvider for LocalGitProvider {
             ],
         )?)
     }
+
+    fn file_versions(
+        &self,
+        repo: Option<&Path>,
+        base: &str,
+        head: &str,
+        path: &RepoRelativePath,
+    ) -> Result<Option<FileVersions>, RepoctlError> {
+        let head = resolve(repo, head)?;
+        let base = resolve(repo, base)?;
+        let common = git(repo, &["merge-base", &base, &head])?;
+        let common = std::str::from_utf8(&common)
+            .map_err(|error| RepoctlError::Environment(error.to_string()))?
+            .trim();
+        Ok(Some(FileVersions {
+            old: blob(repo, common, path)?,
+            new: blob(repo, &head, path)?,
+        }))
+    }
+}
+
+/// A working-tree file against its `HEAD` version, for local (uncommitted) changes.
+pub(super) fn local_file_versions(
+    repo: &Path,
+    path: &RepoRelativePath,
+) -> Result<FileVersions, RepoctlError> {
+    let has_head = git(Some(repo), &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok();
+    Ok(FileVersions {
+        old: if has_head {
+            blob(Some(repo), "HEAD", path)?
+        } else {
+            None
+        },
+        new: std::fs::read_to_string(repo.join(path.as_str())).ok(),
+    })
+}
+
+/// A file's content at `commit`, or `None` when the commit has no such file.
+fn blob(
+    repo: Option<&Path>,
+    commit: &str,
+    path: &RepoRelativePath,
+) -> Result<Option<String>, RepoctlError> {
+    let listed = git(
+        repo,
+        &["ls-tree", "--name-only", commit, "--", path.as_str()],
+    )?;
+    if listed.is_empty() {
+        return Ok(None);
+    }
+    let bytes = git(repo, &["show", &format!("{commit}:{}", path.as_str())])?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| RepoctlError::Environment(format!("{path} is not UTF-8: {error}")))
 }
 
 /// Includes staged, unstaged, deleted and untracked files for local commands.

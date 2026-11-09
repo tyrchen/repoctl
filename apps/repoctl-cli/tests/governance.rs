@@ -526,6 +526,75 @@ fn test_should_select_both_rename_owners_and_local_untracked_files() -> TestResu
 }
 
 #[test]
+fn test_should_attribute_root_cargo_lock_changes_to_the_projects_they_reach() -> TestResult {
+    let temp = fixture()?;
+    app(temp.path(), "")?;
+    write(
+        temp.path(),
+        "apps/other/project.yaml",
+        "schema: company.project/v1\nname: apps.other\nkind: app\npath: apps/other\n",
+    )?;
+    let manifest = "[workspace]\nresolver = \"3\"\nmembers = [\"apps/catalog\", \
+                    \"apps/other\"]\n\n[workspace.dependencies]\nserde = \"1\"\n";
+    write(temp.path(), "Cargo.toml", manifest)?;
+    let crate_manifest = |name: &str, version: &str| {
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \
+             \"{version}\"\n\n[dependencies]\nserde.workspace = true\n"
+        )
+    };
+    write(
+        temp.path(),
+        "apps/catalog/Cargo.toml",
+        &crate_manifest("catalog", "0.1.0"),
+    )?;
+    write(
+        temp.path(),
+        "apps/other/Cargo.toml",
+        &crate_manifest("other", "0.1.0"),
+    )?;
+    let lock = |catalog: &str| {
+        format!("version = 4\n\n[[package]]\nname = \"catalog\"\nversion = \"{catalog}\"\ndependencies = [\"serde\"]\n\n[[package]]\nname = \"other\"\nversion = \"0.1.0\"\ndependencies = [\"serde\"]\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.200\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n")
+    };
+    write(temp.path(), "Cargo.lock", &lock("0.1.0"))?;
+    git(temp.path(), &["init", "--quiet", "--initial-branch=main"])?;
+    git(temp.path(), &["add", "."])?;
+    git(temp.path(), &["commit", "--quiet", "-m", "fixture"])?;
+    let base = git(temp.path(), &["rev-parse", "HEAD"])?;
+    write(
+        temp.path(),
+        "apps/catalog/Cargo.toml",
+        &crate_manifest("catalog", "0.1.1"),
+    )?;
+    write(temp.path(), "Cargo.lock", &lock("0.1.1"))?;
+    let local = cli(temp.path(), &["affected"])?;
+    assert_eq!(
+        json(&local)?["directlyAffected"],
+        serde_json::json!(["apps.catalog"])
+    );
+    git(temp.path(), &["commit", "--quiet", "-am", "bump catalog"])?;
+    let range = cli(
+        temp.path(),
+        &["affected", "--base", &base, "--head", "HEAD"],
+    )?;
+    assert_eq!(
+        json(&range)?["directlyAffected"],
+        serde_json::json!(["apps.catalog"])
+    );
+    write(
+        temp.path(),
+        "Cargo.toml",
+        &format!("{manifest}\n[profile.release]\nlto = true\n"),
+    )?;
+    let profile = cli(temp.path(), &["affected"])?;
+    assert_eq!(
+        json(&profile)?["directlyAffected"],
+        serde_json::json!(["apps.catalog", "apps.other"])
+    );
+    Ok(())
+}
+
+#[test]
 fn test_should_compare_merge_base_instead_of_unrelated_base_branch_changes() -> TestResult {
     let temp = fixture()?;
     app(temp.path(), "")?;

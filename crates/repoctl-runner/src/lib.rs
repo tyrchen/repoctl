@@ -10,6 +10,7 @@
 
 mod affected;
 mod cache;
+mod cargo_workspace;
 mod ci;
 mod context;
 mod git;
@@ -25,7 +26,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use affected::compute_affected;
+use affected::{CargoAttribution, compute_affected};
+pub use cargo_workspace::FileVersions;
 pub use git::LocalGitProvider;
 use globset::Glob;
 use planning::plan_task_commands;
@@ -56,6 +58,18 @@ pub trait GitProvider: Send + Sync {
         base: &str,
         head: &str,
     ) -> Result<Vec<RepoRelativePath>, RepoctlError>;
+
+    /// Returns a file's content at the merge base of two refs and at `head`, or `None` when the
+    /// provider cannot read file contents (callers then treat the change conservatively).
+    fn file_versions(
+        &self,
+        _repo: Option<&std::path::Path>,
+        _base: &str,
+        _head: &str,
+        _path: &RepoRelativePath,
+    ) -> Result<Option<FileVersions>, RepoctlError> {
+        Ok(None)
+    }
 }
 
 /// Rust task environment adapter.
@@ -235,7 +249,18 @@ impl RunnerService {
             request.head.as_deref(),
             &request.changed_files,
         )?;
-        Ok(compute_affected(&snapshot, &changed_files, &request.tasks))
+        Ok(compute_affected(
+            &snapshot,
+            &changed_files,
+            &self.cargo_attribution(
+                &snapshot,
+                request.base.as_deref(),
+                request.head.as_deref(),
+                &request.changed_files,
+                &changed_files,
+            )?,
+            &request.tasks,
+        ))
     }
 
     /// Plans tasks without executing them.
@@ -258,7 +283,18 @@ impl RunnerService {
                 request.head.as_deref(),
                 &request.changed_files,
             )?;
-            Some(compute_affected(&snapshot, &changed_files, &request.tasks))
+            Some(compute_affected(
+                &snapshot,
+                &changed_files,
+                &self.cargo_attribution(
+                    &snapshot,
+                    request.base.as_deref(),
+                    request.head.as_deref(),
+                    &request.changed_files,
+                    &changed_files,
+                )?,
+                &request.tasks,
+            ))
         } else {
             None
         };
@@ -662,7 +698,18 @@ impl RunnerService {
             request.head.as_deref(),
             &request.changed_files,
         )?;
-        let affected = compute_affected(&snapshot, &changed_files, &[]);
+        let affected = compute_affected(
+            &snapshot,
+            &changed_files,
+            &self.cargo_attribution(
+                &snapshot,
+                request.base.as_deref(),
+                request.head.as_deref(),
+                &request.changed_files,
+                &changed_files,
+            )?,
+            &[],
+        );
         let diagnostics = self.engine.policies().evaluate(&snapshot, &changed_files)?;
         let dns = ops_dns_operations(&snapshot, &affected);
         let cdn = ops_cdn_checks(&snapshot, &affected);
@@ -728,7 +775,18 @@ impl RunnerService {
         } else {
             request.environments.clone()
         };
-        let affected = compute_affected(&snapshot, &changed_files, &request.tasks);
+        let affected = compute_affected(
+            &snapshot,
+            &changed_files,
+            &self.cargo_attribution(
+                &snapshot,
+                request.base.as_deref(),
+                request.head.as_deref(),
+                &request.changed_files,
+                &changed_files,
+            )?,
+            &request.tasks,
+        );
         let task_request = TaskRunRequest {
             no_cache: false,
             repo: request.repo.clone(),
@@ -1019,6 +1077,45 @@ impl RunnerService {
         }
     }
 
+    /// Attributes changed root `Cargo.toml`/`Cargo.lock` files to the projects they reach. Explicit
+    /// change lists carry no file contents, so they stay repo-wide.
+    fn cargo_attribution(
+        &self,
+        snapshot: &RepoSnapshot,
+        base: Option<&str>,
+        head: Option<&str>,
+        explicit: &[RepoRelativePath],
+        changed_files: &[RepoRelativePath],
+    ) -> Result<CargoAttribution, RepoctlError> {
+        let mut attribution = CargoAttribution::new();
+        if !explicit.is_empty() {
+            return Ok(attribution);
+        }
+        let root = snapshot.root.absolute.as_std_path();
+        for file in changed_files.iter().filter(|file| {
+            matches!(
+                file.as_str(),
+                cargo_workspace::ROOT_MANIFEST | cargo_workspace::ROOT_LOCK
+            )
+        }) {
+            let versions = match (base, head) {
+                (Some(base), Some(head)) => self.git.file_versions(Some(root), base, head, file)?,
+                _ => Some(git::local_file_versions(root, file)?),
+            };
+            if let Some(projects) = versions.and_then(|versions| {
+                cargo_workspace::affected_projects(
+                    root,
+                    &snapshot.projects,
+                    file.as_str(),
+                    &versions,
+                )
+            }) {
+                attribution.insert(file.clone(), projects);
+            }
+        }
+        Ok(attribution)
+    }
+
     fn no_task_plan_diagnostics(
         &self,
         request: &TaskRunRequest,
@@ -1042,7 +1139,18 @@ impl RunnerService {
                     "no changed files were found for affected task planning",
                 )]);
             }
-            let affected = compute_affected(&snapshot, &changed_files, &request.tasks);
+            let affected = compute_affected(
+                &snapshot,
+                &changed_files,
+                &self.cargo_attribution(
+                    &snapshot,
+                    request.base.as_deref(),
+                    request.head.as_deref(),
+                    &request.changed_files,
+                    &changed_files,
+                )?,
+                &request.tasks,
+            );
             if affected.directly_affected.is_empty() && affected.transitively_affected.is_empty() {
                 return Ok(vec![Diagnostic::warning(
                     "task.plan.no_affected_projects",
@@ -2293,6 +2401,7 @@ mod tests {
         let report = compute_affected(
             &snapshot,
             &[RepoRelativePath::new("apps/catalog/src/lib.rs").expect("path")],
+            &CargoAttribution::new(),
             &[TaskName::new("check").expect("task")],
         );
         assert_eq!(report.directly_affected[0].as_str(), "apps.catalog");
@@ -2388,6 +2497,7 @@ mod tests {
             let report = compute_affected(
                 &snapshot,
                 &[RepoRelativePath::new("apps/catalog/source").expect("path")],
+                &CargoAttribution::new(),
                 &[],
             );
             assert_eq!(
