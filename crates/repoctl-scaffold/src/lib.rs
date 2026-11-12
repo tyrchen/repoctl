@@ -79,7 +79,6 @@ impl ScaffoldService {
             "core-infra",
             "templates",
             "tools",
-            "docs",
             "target/repoctl",
         ] {
             operations.push(directory_operation(directory)?);
@@ -110,7 +109,6 @@ impl ScaffoldService {
             github_workflow(),
         )?);
         operations.push(file_operation(".gitignore", gitignore())?);
-        operations.push(file_operation("docs/index.md", docs_index())?);
         operations.extend(skill_operations(true)?);
         apply_operations(&root, &operations, request.dry_run)?;
         Ok(InitPlan {
@@ -2182,18 +2180,6 @@ wheels/
     )
 }
 
-fn docs_index() -> String {
-    format!(
-        r#"{MANAGED_HEADER}
-# Documentation
-
-- [Repository README](../README.md)
-- Project docs live under each project `docs/` directory.
-- Architecture decisions and operational runbooks should be added here as the monorepo grows.
-"#
-    )
-}
-
 fn builtin_template_names() -> [&'static str; 5] {
     ["repo", "app", "framework", "foundation", "skills"]
 }
@@ -2437,10 +2423,6 @@ fn project_base_operations(
             &project_agents(request, slug, AgentSurface::Claude),
         )?,
         file_operation(
-            &format!("{}/docs/index.md", request.path),
-            project_docs_index(slug),
-        )?,
-        file_operation(
             &format!("{}/deploy/README.md", request.path),
             deploy_readme(slug),
         )?,
@@ -2504,16 +2486,6 @@ fn project_agents(request: &NewProjectRequest, slug: &str, surface: AgentSurface
 "#,
         product = surface.product_name(),
         path = request.path,
-    )
-}
-
-fn project_docs_index(slug: &str) -> String {
-    format!(
-        r#"{MANAGED_HEADER}
-# {slug} Docs
-
-Add project-specific architecture notes, runbooks, API notes, and operating procedures here.
-"#
     )
 }
 
