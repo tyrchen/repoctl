@@ -92,6 +92,20 @@ impl YamlManifestParser {
         self.parse_template(ManifestSource::new(path, bytes.to_vec()))
     }
 
+    /// Reports whether a repo manifest declares a top-level `protos` block.
+    ///
+    /// The block is optional and `protos.root` defaults to `protos`; this tells a repository that
+    /// configured proto contracts apart from one that never mentions them.
+    pub fn repo_declares_protos(bytes: &[u8]) -> Result<bool, RepoctlError> {
+        let value: serde_norway::Value = serde_norway::from_slice(bytes).map_err(|error| {
+            RepoctlError::diagnostic(Diagnostic::error(
+                "manifest.yaml",
+                format!("failed to parse YAML: {error}"),
+            ))
+        })?;
+        Ok(value.get("protos").is_some())
+    }
+
     /// Returns the generated JSON Schema for repo manifests.
     pub fn repo_schema() -> serde_json::Value {
         serde_json::to_value(schema_for!(RawRepoManifest)).unwrap_or_else(|_| serde_json::json!({}))

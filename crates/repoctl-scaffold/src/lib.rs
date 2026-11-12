@@ -111,7 +111,7 @@ impl ScaffoldService {
         )?);
         operations.push(file_operation(".gitignore", gitignore())?);
         operations.push(file_operation("docs/index.md", docs_index())?);
-        operations.extend(skill_operations()?);
+        operations.extend(skill_operations(true)?);
         apply_operations(&root, &operations, request.dry_run)?;
         Ok(InitPlan {
             operations,
@@ -130,7 +130,7 @@ impl ScaffoldService {
         request: &SkillsFacadeRequest,
     ) -> Result<SkillsFacadeReport, RepoctlError> {
         let root = locate_or_current(request.repo.as_deref())?;
-        let operations = skill_operations()?;
+        let operations = skill_operations(repo_declares_protos(&root)?)?;
         let mut diagnostics = Vec::new();
         let mut diffs = Vec::new();
         for operation in &operations {
@@ -1268,13 +1268,24 @@ fn compact_line_diff(current: &str, expected: &str) -> String {
     output
 }
 
-fn skill_operations() -> Result<Vec<FileOperation>, RepoctlError> {
+/// A repo without `repo.yaml` (fresh init) gets the full set; otherwise the manifest decides.
+fn repo_declares_protos(root: &Utf8PathBuf) -> Result<bool, RepoctlError> {
+    let manifest = root.join("repo.yaml");
+    if !manifest.exists() {
+        return Ok(true);
+    }
+    let bytes =
+        fs::read(manifest.as_std_path()).map_err(|source| RepoctlError::io(manifest, source))?;
+    YamlManifestParser::repo_declares_protos(&bytes)
+}
+
+fn skill_operations(protos: bool) -> Result<Vec<FileOperation>, RepoctlError> {
     let mut operations = Vec::new();
     for (root, surface) in [
         (".agents/skills", AgentSurface::Codex),
         (".claude/skills", AgentSurface::Claude),
     ] {
-        for spec in skill_specs(surface) {
+        for spec in skill_specs(surface, protos) {
             operations.push(file_operation(
                 &format!("{root}/{}/SKILL.md", spec.name),
                 spec.content,
@@ -1301,7 +1312,7 @@ struct GeneratedSkill {
     content: String,
 }
 
-fn skill_specs(surface: AgentSurface) -> Vec<GeneratedSkill> {
+fn skill_specs(surface: AgentSurface, protos: bool) -> Vec<GeneratedSkill> {
     vec![
         GeneratedSkill {
             name: "repoctl",
@@ -1320,7 +1331,7 @@ fn skill_specs(surface: AgentSurface) -> Vec<GeneratedSkill> {
             default_prompt: "Use the monorepo-boundaries skill to classify changed paths, confirm \
                              ownership, and prevent cross-project dependency or generated-code \
                              mistakes.",
-            content: boundary_skill(surface),
+            content: boundary_skill(surface, protos),
         },
         GeneratedSkill {
             name: "proto-change",
@@ -1329,7 +1340,11 @@ fn skill_specs(surface: AgentSurface) -> Vec<GeneratedSkill> {
             default_prompt: "Use the proto-change skill to locate proto ownership, check \
                              consumers, update source contracts, and regenerate or validate \
                              outputs through repoctl.",
-            content: proto_skill(surface),
+            content: if protos {
+                proto_skill(surface)
+            } else {
+                proto_unconfigured_skill(surface)
+            },
         },
         GeneratedSkill {
             name: "app-creation",
@@ -1348,7 +1363,7 @@ fn skill_specs(surface: AgentSurface) -> Vec<GeneratedSkill> {
                                 flags",
             default_prompt: "Use the pr-review skill to summarize impact, identify owners, check \
                              risky paths, and select the smallest meaningful verification gates.",
-            content: pr_review_skill(surface),
+            content: pr_review_skill(surface, protos),
         },
     ]
 }
@@ -1511,11 +1526,12 @@ the repo is ready.
     )
 }
 
-fn boundary_skill(surface: AgentSurface) -> String {
+fn boundary_skill(surface: AgentSurface, protos: bool) -> String {
     skill_content(
         "monorepo-boundaries",
         "Respect app, framework, foundation, proto, generated-code, and IaC boundaries.",
-        r#"## When this fires
+        &drop_proto_lines(
+            r#"## When this fires
 
 - A change touches imports, package manifests, workspace membership, generated code, proto ownership,
   IaC, deployment config, or multiple project roots.
@@ -1596,6 +1612,43 @@ fn boundary_skill(surface: AgentSurface) -> String {
 
 Name the owning project, why the chosen directory is correct, which boundary checks ran, and any
 owner review required before merge.
+"#,
+            protos,
+        ),
+        surface,
+    )
+}
+
+/// Removes the lines that point at the `protos/` root when the repo declares no proto contracts.
+fn drop_proto_lines(body: &str, protos: bool) -> String {
+    if protos {
+        return body.to_string();
+    }
+    let mut kept = body
+        .lines()
+        .filter(|line| !line.contains("`protos/`") && !line.contains("Source protos live"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    kept.push('\n');
+    kept
+}
+
+fn proto_unconfigured_skill(surface: AgentSurface) -> String {
+    skill_content(
+        "proto-change",
+        "Change source proto contracts through owners and never edit generated code directly.",
+        r#"## When this fires
+
+- The user changes `.proto` files, generated clients, API contracts, or event schemas.
+
+## Status
+
+This repository does not configure proto contracts: `repo.yaml` has no `protos` block and there is
+no proto source root. Do not look for or create a proto directory on your own.
+
+If a proto contract is genuinely needed, stop and ask the owner to add a `protos` block to
+`repo.yaml` and declare ownership in the relevant `project.yaml`, then run `repoctl skills sync` to
+restore the full proto-change workflow.
 "#,
         surface,
     )
@@ -1754,11 +1807,12 @@ and the validation commands run.
     )
 }
 
-fn pr_review_skill(surface: AgentSurface) -> String {
+fn pr_review_skill(surface: AgentSurface, protos: bool) -> String {
     skill_content(
         "pr-review",
         "Summarize PR impact using repoctl affected data, risk flags, and graph diagnostics.",
-        r#"## When this fires
+        &drop_proto_lines(
+            r#"## When this fires
 
 - The user asks for a PR review, impact summary, CI explanation, or merge readiness check.
 - The diff touches multiple projects, manifests, proto contracts, generated code, IaC, deploy files,
@@ -1849,6 +1903,8 @@ If there are no findings, say so clearly and name residual risks or skipped gate
 Return findings first, then affected projects, risk flags, commands run, and any verification gap
 that remains before merge.
 "#,
+            protos,
+        ),
         surface,
     )
 }
@@ -3070,6 +3126,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_should_render_proto_paths_only_when_repo_declares_protos() {
+        let with = skill_operations(true).expect("ops");
+        let without = skill_operations(false).expect("ops");
+        let text = |ops: &[FileOperation], needle: &str| {
+            ops.iter()
+                .filter(|op| op.path.as_str().contains(needle))
+                .filter_map(|op| op.content.clone())
+                .collect::<String>()
+        };
+        for name in ["monorepo-boundaries", "pr-review", "proto-change"] {
+            assert!(
+                text(&with, name).contains("`protos/`"),
+                "{name} with protos"
+            );
+            assert!(
+                !text(&without, name).contains("`protos/`"),
+                "{name} without protos"
+            );
+        }
+        assert!(text(&without, "proto-change").contains("does not configure proto contracts"));
+        assert_eq!(
+            text(&with, "repoctl/SKILL.md"),
+            text(&without, "repoctl/SKILL.md")
+        );
+        assert_eq!(text(&with, "app-creation"), text(&without, "app-creation"));
+    }
+
+    #[test]
+    fn test_should_sync_skills_by_repo_protos_declaration() {
+        let service = ScaffoldService::with_default_adapters();
+        for (manifest, expect_protos) in [
+            (
+                "schema: repoctl.repo/v1\nname: acme\nlayout: functional\n",
+                false,
+            ),
+            (
+                "schema: repoctl.repo/v1\nname: acme\nlayout: functional\nprotos:\n  root: \
+                 protos\n",
+                true,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            fs::write(temp.path().join("repo.yaml"), manifest).expect("write");
+            let request = SkillsFacadeRequest {
+                repo: Some(temp.path().to_path_buf()),
+                sync: true,
+                ..SkillsFacadeRequest::default()
+            };
+            service.skills(&request).expect("sync");
+            let skill =
+                fs::read_to_string(temp.path().join(".claude/skills/proto-change/SKILL.md"))
+                    .expect("skill");
+            assert_eq!(skill.contains("`protos/`"), expect_protos);
+        }
+    }
+
+    #[test]
     fn test_should_init_functional_repo() {
         let temp = tempfile::tempdir().expect("tempdir");
         let service = ScaffoldService::with_default_adapters();
@@ -3210,7 +3323,7 @@ mod tests {
 
     #[test]
     fn test_should_generate_verification_budget_agent_policy() {
-        for skill in skill_specs(AgentSurface::Codex) {
+        for skill in skill_specs(AgentSurface::Codex, true) {
             assert!(
                 !skill.content.contains("@generated by repoctl"),
                 "skill `{}` should not contain the old generated marker",
