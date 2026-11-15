@@ -3,6 +3,9 @@ PUBLISH_CRATES := repoctl-core repoctl-engine repoctl-runner repoctl-scaffold re
 build:
 	@cargo build
 
+install:
+	@cargo install --locked --path apps/repoctl-cli
+
 test:
 	@cargo nextest run --all-features
 
@@ -51,4 +54,4 @@ publish:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test test-governance test-buf check-agent-sync release publish-dry-run publish update-submodule
+.PHONY: build install test test-governance test-buf check-agent-sync release publish-dry-run publish update-submodule

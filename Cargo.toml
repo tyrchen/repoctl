@@ -3,7 +3,7 @@ members = ["crates/*", "apps/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.7.5"
+version = "0.7.6"
 authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 edition = "2024"
 license = "MIT"
@@ -29,7 +29,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_norway = "0.9.42"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros", "process", "io-util", "time", "fs"] }
+tokio = { version = "1.53.3", features = ["rt", "rt-multi-thread", "macros", "process", "io-util", "time", "fs"] }
 toml_edit = "0.25.17"
 tree-sitter = "0.26.13"
 tree-sitter-python = "0.25.0"
@@ -37,9 +37,9 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 
 # workspace crates
-repoctl-core = { path = "crates/core", version = "0.7.5" }
-repoctl-engine = { path = "crates/repoctl-engine", version = "0.7.5" }
-repoctl-inspect = { path = "crates/repoctl-inspect", version = "0.7.5" }
-repoctl-runner = { path = "crates/repoctl-runner", version = "0.7.5" }
-repoctl-scaffold = { path = "crates/repoctl-scaffold", version = "0.7.5" }
-repoctl = { path = "crates/repoctl", version = "0.7.5" }
+repoctl-core = { path = "crates/core", version = "0.7.6" }
+repoctl-engine = { path = "crates/repoctl-engine", version = "0.7.6" }
+repoctl-inspect = { path = "crates/repoctl-inspect", version = "0.7.6" }
+repoctl-runner = { path = "crates/repoctl-runner", version = "0.7.6" }
+repoctl-scaffold = { path = "crates/repoctl-scaffold", version = "0.7.6" }
+repoctl = { path = "crates/repoctl", version = "0.7.6" }
