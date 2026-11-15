@@ -31,6 +31,8 @@ use repoctl_engine::RepoctlEngine;
 use repoctl_runner::RunnerService;
 use tree_sitter::{Language, Node, Parser};
 
+mod typescript;
+
 const BINARY_PREFIX_BYTES: usize = 8 * 1024;
 const HEAVY_DIR_NAMES: &[&str] = &[
     ".git",
@@ -381,7 +383,12 @@ fn scan_file(
             reason: "parser_init_error".to_string(),
         };
     }
-    let Some(tree) = parser.parse(&bytes, None) else {
+    let tree = if file.language == CodeLanguage::TypeScript {
+        typescript::parse(&mut parser, &bytes)
+    } else {
+        parser.parse(&bytes, None)
+    };
+    let Some(tree) = tree else {
         return ScanResult::Errored {
             diagnostic: Diagnostic::warning(
                 "inspect.code_size.syntax_error",
@@ -1360,6 +1367,39 @@ mod tests {
         assert!(spans.iter().any(|span| {
             span.kind == SyntaxSpanKind::Function && span.symbol.as_deref() == Some("Card")
         }));
+    }
+
+    #[test]
+    fn test_should_inspect_functions_after_type_only_star_exports() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_repo_manifest(
+            temp.path(),
+            "\ninspection:\n  code_size:\n    rules:\n      function:\n        max_lines: 2\n",
+        );
+        write_project(temp.path(), "apps/catalog", "");
+        for extension in ["ts", "tsx", "mts", "cts"] {
+            write_file(
+                temp.path(),
+                &format!("apps/catalog/src/exports.{extension}"),
+                "export type * from './types';\nexport type * as Types from './types';\n// 中文😀 \
+                 keeps byte offsets intact.\nexport function measured() {\n  const value = 1;\n  \
+                 return value;\n}\n",
+            );
+        }
+        let report = inspect_temp_repo(temp.path(), CodeSizeScope::All, Vec::new());
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        assert_eq!(report.summary.files_scanned, 4);
+        let functions: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.rule == CodeSizeRuleKind::Function)
+            .collect();
+        assert_eq!(functions.len(), 4);
+        for finding in functions {
+            assert_eq!(finding.symbol.as_deref(), Some("measured"));
+            assert_eq!(finding.start_line.get(), 4);
+            assert_eq!(finding.end_line.get(), 7);
+        }
     }
 
     #[test]
