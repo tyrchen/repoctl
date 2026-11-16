@@ -378,3 +378,9 @@ output.
   support in v0.5 does not imply JavaScript support.
 - Whether class size should become a fourth rule. v0.5 keeps the requested
   three rules only.
+
+## Branch comparison and import-type calls (0.7.7)
+
+Changed and affected code-size scans compare the merge base of `base` and `head` with `head`, matching affected-project discovery. They read NUL-delimited Git paths so Unicode and whitespace are preserved. Explicit `changed_files` still bypass Git discovery. A diverged-branch regression verifies that a file changed only on the base branch is excluded.
+
+The TypeScript grammar adapter also recognizes the misparsed single-string import type in `await load<typeof import("./types")>()`. It substitutes a same-width type identifier and reparses the whole file. Function byte offsets remain stable and unrelated syntax errors still fail inspection. Both TypeScript and TSX grammars are covered; the original report is tracked as clade:IDEA-100. Branch-range alignment resolves clade:IDEA-89.
