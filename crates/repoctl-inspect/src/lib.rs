@@ -856,9 +856,10 @@ fn changed_files(
     let output = Command::new("git")
         .arg("diff")
         .arg("--name-only")
+        .arg("-z")
         .arg("--diff-filter=ACMR")
-        .arg(base)
-        .arg(head)
+        .arg(format!("{base}...{head}"))
+        .arg("--")
         .current_dir(root.absolute.as_std_path())
         .output()
         .map_err(|source| {
@@ -871,8 +872,8 @@ fn changed_files(
         )));
     }
     String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
+        .split('\0')
+        .filter(|line| !line.is_empty())
         .map(|line| RepoRelativePath::new(line.to_string()).map_err(RepoctlError::diagnostic))
         .collect()
 }
@@ -1302,7 +1303,7 @@ fn nonzero_u32(value: u32) -> NonZeroU32 {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
     use repoctl_core::{
         CodeLanguage, CodeSizeInspectionRequest, CodeSizeRuleKind, CodeSizeScope, ProjectAiSpec,
@@ -1452,6 +1453,70 @@ mod tests {
         assert_eq!(
             project_generated_pattern(&project, &project.ai.do_not_edit[0]),
             "**/generated/**"
+        );
+    }
+
+    #[test]
+    fn test_should_inspect_only_branch_changes_after_the_merge_base() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        write_repo_manifest(
+            root,
+            "\ninspection:\n  code_size:\n    rules:\n      function:\n        max_lines: 2\n",
+        );
+        write_project(root, "apps/catalog", "");
+        let base_file = "apps/catalog/src/base.rs";
+        let feature_file = "apps/catalog/src/feature 源.rs";
+        write_file(root, base_file, "pub fn base() {}\n");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        git(&["switch", "-c", "feature"]);
+        write_file(
+            root,
+            feature_file,
+            "pub fn feature() {\nlet a = 1;\nlet b = 2;\nlet _c = a + b;\n}\n",
+        );
+        git(&["add", "."]);
+        git(&["commit", "-m", "feature"]);
+        git(&["switch", "main"]);
+        write_file(
+            root,
+            base_file,
+            "pub fn base() {\nlet a = 1;\nlet b = 2;\nlet _c = a + b;\n}\n",
+        );
+        git(&["add", "."]);
+        git(&["commit", "-m", "base advances"]);
+        git(&["switch", "feature"]);
+        let report = InspectorService::with_default_adapters()
+            .inspect_size(&CodeSizeInspectionRequest {
+                repo: Some(root.to_path_buf()),
+                scope: CodeSizeScope::Changed,
+                base: Some("main".into()),
+                head: Some("HEAD".into()),
+                ..CodeSizeInspectionRequest::default()
+            })
+            .expect("inspect");
+        assert_eq!(report.summary.files_considered, 1);
+        assert!(!report.findings.is_empty());
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.path.as_str() == feature_file)
         );
     }
 
