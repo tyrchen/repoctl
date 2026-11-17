@@ -1593,6 +1593,34 @@ mod tests {
     }
 
     #[test]
+    fn test_should_scope_summary_provider_warnings_to_affected_projects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_universe_ops_fixture(temp.path());
+        let facade = Repoctl::with_default_adapters().expect("facade");
+        let summary = facade
+            .pr_summary(PrSummaryRequest {
+                repo: Some(temp.path().to_path_buf()),
+                changed_files: vec![
+                    RepoRelativePath::new("apps/slides/infra/index.ts").expect("path"),
+                ],
+                ..PrSummaryRequest::default()
+            })
+            .expect("summary");
+        assert!(!summary.markdown.contains("invokedViaFunctionUrl"));
+        let global = facade
+            .provider_capabilities(ProviderCapabilityRequest {
+                repo: Some(temp.path().to_path_buf()),
+                ..ProviderCapabilityRequest::default()
+            })
+            .expect("global capabilities");
+        assert!(
+            global
+                .iter()
+                .any(|report| report.field == "invokedViaFunctionUrl")
+        );
+    }
+
+    #[test]
     fn test_should_list_render_templates_and_check_codegen_through_facade() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_phase789_fixture(temp.path());

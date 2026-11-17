@@ -713,7 +713,8 @@ impl RunnerService {
         let diagnostics = self.engine.policies().evaluate(&snapshot, &changed_files)?;
         let dns = ops_dns_operations(&snapshot, &affected);
         let cdn = ops_cdn_checks(&snapshot, &affected);
-        let provider_capabilities = provider_capability_reports(&snapshot, None, &changed_files)?;
+        let provider_capabilities =
+            provider_capability_reports(&snapshot, None, &changed_files, Some(&affected))?;
         let production_gaps = ops_production_gaps(&snapshot);
         Ok(render_pr_summary(
             &snapshot,
@@ -806,7 +807,8 @@ impl RunnerService {
         let cdn = ops_cdn_checks(&snapshot, &affected);
         let probes = ops_probes(&snapshot, &affected);
         let manual_reconciliation = ops_manual_state(&snapshot, &affected);
-        let provider_capabilities = provider_capability_reports(&snapshot, None, &changed_files)?;
+        let provider_capabilities =
+            provider_capability_reports(&snapshot, None, &changed_files, Some(&affected))?;
         let diagnostics = ops_plan_diagnostics(
             request,
             &changed_files,
@@ -940,8 +942,12 @@ impl RunnerService {
             request.head.as_deref(),
             &request.changed_files,
         )?;
-        let mut reports =
-            provider_capability_reports(&snapshot, request.workspace.as_deref(), &changed_files)?;
+        let mut reports = provider_capability_reports(
+            &snapshot,
+            request.workspace.as_deref(),
+            &changed_files,
+            None,
+        )?;
         if reports.is_empty() {
             reports.push(provider_capability_not_found_report("all-workspaces"));
         }
@@ -1690,9 +1696,16 @@ fn provider_capability_reports(
     snapshot: &RepoSnapshot,
     selector: Option<&str>,
     changed_files: &[RepoRelativePath],
+    affected: Option<&AffectedReport>,
 ) -> Result<Vec<ProviderCapabilityReport>, RepoctlError> {
     let mut reports = Vec::new();
     for project in &snapshot.projects {
+        if affected.is_some_and(|report| {
+            !report.directly_affected.contains(&project.name)
+                && !report.transitively_affected.contains(&project.name)
+        }) {
+            continue;
+        }
         for workspace in &project.workspaces {
             let workspace_id = format!("{}:{}", project.name, workspace.name);
             let workspace_root = project
@@ -1725,10 +1738,27 @@ fn provider_capability_reports(
                 "invokedViaFunctionUrl",
             )?;
             let provider_major_changed = changed_files.iter().any(|file| {
-                file.as_str().ends_with("package.json")
-                    || file.as_str().ends_with("package-lock.json")
-                    || file.as_str().ends_with("pnpm-lock.yaml")
-                    || file.as_str().ends_with("yarn.lock")
+                matches!(
+                    file.as_str(),
+                    "package.json"
+                        | "package-lock.json"
+                        | "pnpm-lock.yaml"
+                        | "pnpm-workspace.yaml"
+                        | "yarn.lock"
+                        | "bun.lock"
+                        | "bun.lockb"
+                ) || (file.as_str().starts_with(&format!("{workspace_root}/"))
+                    && matches!(
+                        file.as_str().rsplit('/').next(),
+                        Some(
+                            "package.json"
+                                | "package-lock.json"
+                                | "pnpm-lock.yaml"
+                                | "yarn.lock"
+                                | "bun.lock"
+                                | "bun.lockb"
+                        )
+                    ))
             });
             if uses_function_url_field && !version_supports_invoked_via_function_url(&version) {
                 reports.push(ProviderCapabilityReport {
@@ -2515,6 +2545,46 @@ mod tests {
     }
 
     #[test]
+    fn test_should_treat_only_unowned_tool_make_fragments_as_shared_inputs() {
+        let mut snapshot = fixture_snapshot();
+        let mut tool = snapshot.projects[0].clone();
+        tool.name = ProjectName::new("tools.builder").expect("name");
+        tool.path = RepoRelativePath::new("tools/builder").expect("path");
+        snapshot.projects.push(tool);
+        for path in ["tools/sbe.mk", "tools/mk/deploy.mk"] {
+            let report = compute_affected(
+                &snapshot,
+                &[RepoRelativePath::new(path).expect("path")],
+                &CargoAttribution::new(),
+                &[],
+            );
+            assert_eq!(report.directly_affected.len(), 2);
+            assert!(report.diagnostics.is_empty());
+            assert_eq!(report.tasks.len(), 2);
+        }
+        let report = compute_affected(
+            &snapshot,
+            &[RepoRelativePath::new("tools/builder/local.mk").expect("path")],
+            &CargoAttribution::new(),
+            &[],
+        );
+        assert_eq!(
+            report.directly_affected,
+            vec![ProjectName::new("tools.builder").expect("name")]
+        );
+        let unknown = compute_affected(
+            &snapshot,
+            &[RepoRelativePath::new("tools/unowned.rs").expect("path")],
+            &CargoAttribution::new(),
+            &[],
+        );
+        assert_eq!(
+            unknown.diagnostics[0].code.as_ref(),
+            "affected.unowned_file"
+        );
+    }
+
+    #[test]
     fn test_should_create_empty_ci_matrix_github_matrix() {
         let report = CiMatrixReport {
             entries: Vec::new(),
@@ -2546,7 +2616,7 @@ mod tests {
     #[test]
     fn test_should_warn_when_selected_provider_capability_is_not_found() {
         let reports =
-            provider_capability_reports(&fixture_snapshot(), Some("apps.catalog:api"), &[])
+            provider_capability_reports(&fixture_snapshot(), Some("apps.catalog:api"), &[], None)
                 .expect("provider reports");
 
         assert_eq!(reports[0].status, "not-found");

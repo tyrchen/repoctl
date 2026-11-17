@@ -38,7 +38,7 @@ pub(super) fn compute_affected(
             }
             continue;
         }
-        if repo_wide_change(changed_file) {
+        if repo_wide_change(changed_file) || shared_make_fragment(snapshot, changed_file) {
             for project in &snapshot.projects {
                 direct.insert(project.name.clone());
                 reasons.push(reason(changed_file, &project.name, "repo-wide change"));
@@ -137,6 +137,17 @@ fn repo_wide_change(changed_file: &RepoRelativePath) -> bool {
                 | "uv.lock"
                 | "pyproject.toml"
         )
+}
+
+// Unowned Make include fragments under tools are shared build inputs, like the root Makefile.
+// A fragment inside a declared tool project retains that project's ordinary ownership.
+fn shared_make_fragment(snapshot: &RepoSnapshot, path: &RepoRelativePath) -> bool {
+    path.as_str().starts_with("tools/")
+        && path.as_str().ends_with(".mk")
+        && !snapshot
+            .projects
+            .iter()
+            .any(|project| project.contains_path(path))
 }
 
 fn reason(path: &RepoRelativePath, project: &ProjectName, message: &str) -> AffectedReason {
